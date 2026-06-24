@@ -1,5 +1,5 @@
 {
-  "name": "agent-mesh-mcp",
+  "name": "@openbiocure/agent-mesh-mcp",
   "version": "0.2.0",
   "description": "MCP server for inter-agent communication via RabbitMQ. Agents ask each other questions by topic.",
   "bin": {
