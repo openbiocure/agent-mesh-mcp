@@ -1,0 +1,19 @@
+{
+  "name": "agent-mesh-mcp",
+  "version": "0.2.0",
+  "description": "MCP server for inter-agent communication via RabbitMQ. Agents ask each other questions by topic.",
+  "bin": {
+    "agent-mesh-mcp": "index.mjs"
+  },
+  "type": "module",
+  "keywords": ["mcp", "agent", "rabbitmq", "multi-agent", "mesh", "claude"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/openbiocure/agent-mesh-mcp"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "amqplib": "^0.10.0"
+  }
+}
