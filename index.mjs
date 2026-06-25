@@ -2,10 +2,11 @@
 /**
  * MCP server for inter-agent communication via RabbitMQ.
  *
- * Exposes ask_agent(topic, question) as an MCP tool.
- * Agents publish questions to a topic exchange, other agents consume and reply.
+ * Tools:
+ *   list_agents()          — list online agents and their topics
+ *   ask_agent(topic, question) — ask an agent a question by topic
  *
- * Env: RABBITMQ_URL, AGENT_NAME, ASK_TIMEOUT, EXCHANGE_NAME
+ * Env: RABBITMQ_URL, RABBITMQ_MGMT_URL, AGENT_NAME, ASK_TIMEOUT, EXCHANGE_NAME
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -14,22 +15,109 @@ import { z } from "zod";
 import amqplib from "amqplib";
 
 const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
-const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
+const RABBITMQ_URL =
+  process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
+const RABBITMQ_MGMT_URL =
+  process.env.RABBITMQ_MGMT_URL || "http://localhost:15672";
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
 
+// Extract credentials from AMQP URL for management API auth
+function getMgmtAuth() {
+  try {
+    const url = new URL(RABBITMQ_URL);
+    return btoa(`${url.username}:${url.password}`);
+  } catch {
+    return btoa("guest:guest");
+  }
+}
+
 const server = new McpServer({
   name: "agent-mesh",
-  version: "0.2.0",
+  version: "0.3.0",
 });
 
 server.tool(
+  "list_agents",
+  "List all online agents and their topics. Call this first to discover available agents before using ask_agent.",
+  {},
+  async () => {
+    try {
+      const auth = getMgmtAuth();
+      const resp = await fetch(`${RABBITMQ_MGMT_URL}/api/queues/%2f`, {
+        headers: { Authorization: `Basic ${auth}` },
+      });
+
+      if (!resp.ok) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `(error: RabbitMQ management API returned ${resp.status}. Is the management plugin enabled?)`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const queues = await resp.json();
+      const agents = queues
+        .filter((q) => q.name.startsWith("agent.") && q.consumers > 0)
+        .map((q) => {
+          const name = q.name.replace("agent.", "");
+          return {
+            name: name,
+            topic: name.replace(/-/g, "."),
+            queue: q.name,
+            consumers: q.consumers,
+            pending_messages: q.messages,
+          };
+        });
+
+      if (agents.length === 0) {
+        return {
+          content: [
+            { type: "text", text: "No agents are currently online." },
+          ],
+        };
+      }
+
+      const lines = agents.map(
+        (a) =>
+          `- **${a.name}** — topic: \`${a.topic}\` (${a.consumers} consumer${a.consumers > 1 ? "s" : ""}, ${a.pending_messages} pending)`
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `**Online agents (${agents.length}):**\n${lines.join("\n")}`,
+          },
+        ],
+      };
+    } catch (err) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: `(error listing agents: ${err.message})`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  }
+);
+
+server.tool(
   "ask_agent",
-  "Ask another agent a question via RabbitMQ. The question is routed by topic to the responsible agent.",
+  "Ask another agent a question via RabbitMQ. Use list_agents() first to see available topics.",
   {
     topic: z
       .string()
-      .describe("The topic to route the question to (e.g. backend, frontend, ops, qa)"),
+      .describe(
+        "The topic to route the question to. Use list_agents() to see available topics."
+      ),
     question: z.string().describe("The question to ask the other agent"),
   },
   async ({ topic, question }) => {
