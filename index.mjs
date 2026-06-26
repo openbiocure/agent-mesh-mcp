@@ -61,18 +61,30 @@ server.tool(
       }
 
       const queues = await resp.json();
-      const agents = queues
-        .filter((q) => q.name.startsWith("agent.") && q.consumers > 0)
-        .map((q) => {
-          const name = q.name.replace("agent.", "");
-          return {
-            name: name,
-            topic: name.replace(/-/g, "."),
-            queue: q.name,
-            consumers: q.consumers,
-            pending_messages: q.messages,
-          };
+      const onlineQueues = queues.filter(
+        (q) => q.name.startsWith("agent.") && q.consumers > 0
+      );
+
+      // Fetch bindings for each online queue to get actual routing keys
+      const agents = [];
+      for (const q of onlineQueues) {
+        const bindResp = await fetch(
+          `${RABBITMQ_MGMT_URL}/api/queues/%2f/${encodeURIComponent(q.name)}/bindings`,
+          { headers: { Authorization: `Basic ${auth}` } }
+        );
+        const bindings = bindResp.ok ? await bindResp.json() : [];
+        const topics = bindings
+          .filter((b) => b.source && b.routing_key.startsWith("ask."))
+          .map((b) => b.routing_key.replace("ask.", ""));
+
+        agents.push({
+          name: q.name.replace("agent.", ""),
+          topics: topics,
+          queue: q.name,
+          consumers: q.consumers,
+          pending_messages: q.messages,
         });
+      }
 
       if (agents.length === 0) {
         return {
@@ -84,7 +96,7 @@ server.tool(
 
       const lines = agents.map(
         (a) =>
-          `- **${a.name}** — topic: \`${a.topic}\` (${a.consumers} consumer${a.consumers > 1 ? "s" : ""}, ${a.pending_messages} pending)`
+          `- **${a.name}** — topic${a.topics.length > 1 ? "s" : ""}: ${a.topics.map((t) => `\`${t}\``).join(", ")} (${a.consumers} consumer${a.consumers > 1 ? "s" : ""}, ${a.pending_messages} pending)`
       );
 
       return {
@@ -118,11 +130,18 @@ server.tool(
       .describe(
         "The topic to route the question to. Use list_agents() to see available topics."
       ),
-    question: z.string().describe("The question to ask the other agent"),
+    message: z.string().describe("The message to send to the other agent"),
+    timeout: z
+      .number()
+      .optional()
+      .describe(
+        "Timeout in seconds to wait for a reply. Default: 900 (15 min). Use shorter for simple questions (e.g. 30), longer for complex tasks."
+      ),
   },
-  async ({ topic, question }) => {
+  async ({ topic, message, timeout: timeoutSec }) => {
     const routingKey = topic.startsWith("ask.") ? topic : `ask.${topic}`;
     const correlationId = crypto.randomUUID();
+    const timeoutMs = (timeoutSec || TIMEOUT / 1000) * 1000;
 
     let conn;
     try {
@@ -134,7 +153,7 @@ server.tool(
         exclusive: true,
       });
 
-      const body = JSON.stringify({ from: AGENT_NAME, question });
+      const body = JSON.stringify({ from: AGENT_NAME, question: message });
 
       ch.publish(EXCHANGE, routingKey, Buffer.from(body), {
         replyTo: replyQueue,
@@ -145,9 +164,9 @@ server.tool(
       const reply = await new Promise((resolve) => {
         const timer = setTimeout(() => {
           resolve(
-            `(timeout: no agent replied on ${routingKey} within ${TIMEOUT / 1000}s)`
+            `(timeout: no agent replied on ${routingKey} within ${timeoutMs / 1000}s)`
           );
-        }, TIMEOUT);
+        }, timeoutMs);
 
         ch.consume(
           replyQueue,
