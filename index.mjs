@@ -153,7 +153,7 @@ server.tool(
         exclusive: true,
       });
 
-      const body = JSON.stringify({ from: AGENT_NAME, question: message });
+      const body = JSON.stringify({ from: AGENT_NAME, message });
 
       ch.publish(EXCHANGE, routingKey, Buffer.from(body), {
         replyTo: replyQueue,
