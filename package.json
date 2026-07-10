@@ -6,7 +6,14 @@
     "agent-mesh-mcp": "index.mjs"
   },
   "type": "module",
-  "keywords": ["mcp", "agent", "rabbitmq", "multi-agent", "mesh", "claude"],
+  "keywords": [
+    "mcp",
+    "agent",
+    "rabbitmq",
+    "multi-agent",
+    "mesh",
+    "claude"
+  ],
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -14,6 +21,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "amqplib": "^0.10.0"
+    "amqplib": "^0.10.0",
+    "express": "^5.2.1"
   }
 }
