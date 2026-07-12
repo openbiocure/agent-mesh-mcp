@@ -22,6 +22,7 @@ import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js
 import { z } from "zod";
 import amqplib from "amqplib";
 import crypto from "crypto";
+import express from "express";
 
 // --- Config ---
 
@@ -210,11 +211,81 @@ function createServer() {
   return server;
 }
 
+// --- OAuth endpoints (proxy to Keycloak) ---
+
+const KC_BASE = `${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}/protocol/openid-connect`;
+const KC_CLIENT_ID = process.env.KEYCLOAK_CLIENT_ID || "agent-mesh";
+const KC_CLIENT_SECRET = process.env.KEYCLOAK_CLIENT_SECRET || "";
+
 // --- HTTP Server ---
 
 const app = createMcpExpressApp({
   host: "0.0.0.0",
   allowedHosts: ["mesh.openbiocure.ai", "localhost"],
+});
+
+// Parse URL-encoded bodies for /token endpoint
+app.use(express.urlencoded({ extended: true }));
+
+// OAuth discovery — tells Claude.ai where the OAuth endpoints are
+app.get("/.well-known/oauth-authorization-server", (req, res) => {
+  res.json({
+    issuer: `https://mesh.openbiocure.ai`,
+    authorization_endpoint: `https://mesh.openbiocure.ai/authorize`,
+    token_endpoint: `https://mesh.openbiocure.ai/token`,
+    registration_endpoint: `https://mesh.openbiocure.ai/register`,
+    response_types_supported: ["code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
+    code_challenge_methods_supported: ["S256"],
+    token_endpoint_auth_methods_supported: ["client_secret_post", "client_secret_basic"],
+  });
+});
+
+// OAuth authorize — redirect to Keycloak with all params
+app.get("/authorize", (req, res) => {
+  const params = new URLSearchParams({
+    response_type: req.query.response_type || "code",
+    client_id: KC_CLIENT_ID,
+    redirect_uri: req.query.redirect_uri,
+    state: req.query.state || "",
+    code_challenge: req.query.code_challenge || "",
+    code_challenge_method: req.query.code_challenge_method || "S256",
+    scope: req.query.scope || "openid",
+  });
+  res.redirect(`${KC_BASE}/auth?${params}`);
+});
+
+// OAuth token exchange — proxy to Keycloak
+app.post("/token", async (req, res) => {
+  try {
+    const body = new URLSearchParams(req.body);
+    // Replace the client_id with our Keycloak client
+    body.set("client_id", KC_CLIENT_ID);
+    body.set("client_secret", KC_CLIENT_SECRET);
+    // Fix redirect_uri if needed
+    const resp = await fetch(`${KC_BASE}/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    const data = await resp.json();
+    res.status(resp.status).json(data);
+  } catch (err) {
+    console.error("Token exchange error:", err.message);
+    res.status(500).json({ error: "token_exchange_failed" });
+  }
+});
+
+// Dynamic client registration (Claude.ai may call this)
+app.post("/register", (req, res) => {
+  res.status(201).json({
+    client_id: KC_CLIENT_ID,
+    client_secret: KC_CLIENT_SECRET,
+    redirect_uris: req.body.redirect_uris || [],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "client_secret_post",
+  });
 });
 
 // Auth on the MCP endpoint
