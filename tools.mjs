@@ -16,6 +16,19 @@ const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
 // In-memory store for async task results
 const taskResults = new Map();
 
+// Persistent AMQP connection for async result listeners
+let _persistentConn = null;
+let _persistentCh = null;
+
+async function getPersistentChannel() {
+  if (_persistentCh) return _persistentCh;
+  _persistentConn = await amqplib.connect(RABBITMQ_URL);
+  _persistentConn.on("close", () => { _persistentConn = null; _persistentCh = null; });
+  _persistentConn.on("error", () => { _persistentConn = null; _persistentCh = null; });
+  _persistentCh = await _persistentConn.createChannel();
+  return _persistentCh;
+}
+
 function getMgmtAuth() {
   try {
     const url = new URL(RABBITMQ_URL);
@@ -108,62 +121,55 @@ export function registerTools(server) {
       const correlationId = crypto.randomUUID();
       const timeoutMs = (timeoutSec || TIMEOUT / 1000) * 1000;
 
-      let conn;
       try {
-        conn = await amqplib.connect(RABBITMQ_URL);
-        const ch = await conn.createChannel();
-
-        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
-        const { queue: replyQueue } = await ch.assertQueue("", { exclusive: true });
-
-        const bodyObj = { from: AGENT_NAME, message };
-        if (isAsync) bodyObj.async = true;
-
-        ch.publish(EXCHANGE, routingKey, Buffer.from(JSON.stringify(bodyObj)), {
-          replyTo: replyQueue,
-          correlationId,
-          contentType: "application/json",
-        });
-
         if (isAsync) {
-          // Wait for the immediate ack (task_id) — should arrive within a few seconds
-          const ack = await new Promise((resolve) => {
-            const timer = setTimeout(() => {
-              resolve(null);
-            }, 10000);
+          // Async: use persistent connection + named durable reply queue
+          const ch = await getPersistentChannel();
+          await ch.assertExchange(EXCHANGE, "topic", { durable: true });
 
+          // Named durable queue that survives connection drops
+          const replyQueue = `reply.${correlationId}`;
+          await ch.assertQueue(replyQueue, { durable: true, autoDelete: true, arguments: { "x-expires": 3600000 } });
+
+          const bodyObj = { from: AGENT_NAME, message, async: true };
+          ch.publish(EXCHANGE, routingKey, Buffer.from(JSON.stringify(bodyObj)), {
+            replyTo: replyQueue,
+            correlationId,
+            contentType: "application/json",
+          });
+
+          // Wait for the immediate ack (task_id)
+          const ack = await new Promise((resolve) => {
+            const timer = setTimeout(() => resolve(null), 10000);
             ch.consume(replyQueue, (msg) => {
               if (msg?.properties.correlationId === correlationId) {
                 clearTimeout(timer);
+                ch.ack(msg);
                 resolve(msg.content.toString());
               }
-            }, { noAck: true });
+            }).then(({ consumerTag }) => {
+              // Store consumer tag for cleanup
+              setTimeout(() => ch.cancel(consumerTag).catch(() => {}), 10000);
+            });
           });
 
           if (!ack) {
-            await conn.close();
             return { content: [{ type: "text", text: "(error: no ack received for async task)" }], isError: true };
           }
 
-          // Parse the ack to get task_id
           let taskId;
-          try {
-            const ackData = JSON.parse(ack);
-            taskId = ackData.task_id;
-          } catch {
-            taskId = null;
-          }
+          try { taskId = JSON.parse(ack).task_id; } catch { taskId = null; }
 
           if (!taskId) {
-            await conn.close();
             return { content: [{ type: "text", text: ack }] };
           }
 
-          // Start background listener for the result
-          taskResults.set(taskId, { status: "processing", result: null });
+          // Start persistent listener for the final result
+          taskResults.set(taskId, { status: "processing", result: null, replyQueue });
 
           ch.consume(replyQueue, (msg) => {
             if (msg?.properties.correlationId === correlationId) {
+              ch.ack(msg);
               const content = msg.content.toString();
               try {
                 const data = JSON.parse(content);
@@ -171,16 +177,29 @@ export function registerTools(server) {
               } catch {
                 taskResults.set(taskId, { status: "completed", result: content });
               }
-              conn.close().catch(() => {});
+              // Delete the reply queue after consuming the result
+              ch.deleteQueue(replyQueue).catch(() => {});
             }
-          }, { noAck: true });
+          });
 
           return {
             content: [{ type: "text", text: `Task accepted. ID: \`${taskId}\`\n\nUse \`get_task_result("${taskId}")\` to poll for the result.` }],
           };
         }
 
-        // Synchronous — wait for reply
+        // Synchronous: use a fresh connection with exclusive queue (original behavior)
+        const conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+
+        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+        const { queue: replyQueue } = await ch.assertQueue("", { exclusive: true });
+
+        ch.publish(EXCHANGE, routingKey, Buffer.from(JSON.stringify({ from: AGENT_NAME, message })), {
+          replyTo: replyQueue,
+          correlationId,
+          contentType: "application/json",
+        });
+
         const reply = await new Promise((resolve) => {
           const timer = setTimeout(() => {
             resolve(`(timeout: no agent replied on ${routingKey} within ${timeoutMs / 1000}s)`);
@@ -197,7 +216,6 @@ export function registerTools(server) {
         await conn.close();
         return { content: [{ type: "text", text: reply }] };
       } catch (err) {
-        if (conn) await conn.close().catch(() => {});
         return {
           content: [{ type: "text", text: `(error: ${err.message})` }],
           isError: true,
