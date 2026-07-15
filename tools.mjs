@@ -119,7 +119,7 @@ export function registerTools(server) {
     async ({ topic, message, timeout: timeoutSec, async: isAsync }) => {
       const routingKey = topic.startsWith("ask.") ? topic : `ask.${topic}`;
       const correlationId = crypto.randomUUID();
-      const timeoutMs = (timeoutSec || TIMEOUT / 1000) * 1000;
+      const timeoutMs = timeoutSec ? Math.max(1, Math.floor(Number(timeoutSec))) * 1000 : TIMEOUT;
 
       try {
         if (isAsync) {
