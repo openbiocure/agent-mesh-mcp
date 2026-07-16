@@ -109,15 +109,17 @@ export function registerTools(server) {
   // --- ask_agent ---
   server.tool(
     "ask_agent",
-    "Ask another agent a question via RabbitMQ. Use list_agents() first to see available topics. For long tasks, set async=true to get a task_id back immediately and poll with get_task_result.",
+    "Ask another agent a question via RabbitMQ. Use list_agents() first to see available topics. For long tasks, set async=true to get a task_id back immediately and poll with get_task_result. Use sid to route to a specific worker instance for multi-turn conversations.",
     {
       topic: z.string().describe("The topic to route the question to."),
       message: z.string().describe("The message to send to the other agent"),
       timeout: z.number().optional().describe("Timeout in seconds (default: 900). Ignored when async=true."),
       async: z.boolean().optional().describe("If true, returns a task_id immediately instead of waiting. Poll with get_task_result(task_id). Use for long-running tasks."),
+      sid: z.string().optional().describe("Worker session ID for sticky routing. Pass the sid from a previous response to route to the same worker instance. Enables multi-turn conversations with context."),
     },
-    async ({ topic, message, timeout: timeoutSec, async: isAsync }) => {
-      const routingKey = topic.startsWith("ask.") ? topic : `ask.${topic}`;
+    async ({ topic, message, timeout: timeoutSec, async: isAsync, sid }) => {
+      // If sid provided, route directly to that worker; otherwise use topic
+      const routingKey = sid ? `direct.${sid}` : (topic.startsWith("ask.") ? topic : `ask.${topic}`);
       const correlationId = crypto.randomUUID();
       const timeoutMs = timeoutSec ? Math.max(1, Math.floor(Number(timeoutSec))) * 1000 : TIMEOUT;
 
@@ -208,13 +210,17 @@ export function registerTools(server) {
           ch.consume(replyQueue, (msg) => {
             if (msg?.properties.correlationId === correlationId) {
               clearTimeout(timer);
-              resolve(msg.content.toString());
+              const replySid = msg.properties.headers?.["x-worker-sid"] || null;
+              resolve({ text: msg.content.toString(), sid: replySid });
             }
           }, { noAck: true });
         });
 
         await conn.close();
-        return { content: [{ type: "text", text: reply }] };
+        const replyText = typeof reply === "string" ? reply : reply.text;
+        const replySid = typeof reply === "string" ? null : reply.sid;
+        const sidNote = replySid ? `\n\n---\n_sid: \`${replySid}\`_ (pass this to ask_agent to continue with the same worker)` : "";
+        return { content: [{ type: "text", text: replyText + sidNote }] };
       } catch (err) {
         return {
           content: [{ type: "text", text: `(error: ${err.message})` }],
