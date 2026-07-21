@@ -262,6 +262,31 @@ export function registerTools(server) {
     }
   );
 
+  // --- cancel_agent ---
+  server.tool(
+    "cancel_agent",
+    "Cancel a running task on a specific worker instance. Requires the worker's sid from a previous ask_agent response. The worker will abort its current Claude session and return whatever partial result it has.",
+    {
+      sid: z.string().describe("Worker session ID (sid) from a previous ask_agent response."),
+    },
+    async ({ sid }) => {
+      let conn;
+      try {
+        conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+        ch.publish(EXCHANGE, `cancel.${sid}`, Buffer.from(JSON.stringify({ from: AGENT_NAME, action: "cancel" })), {
+          contentType: "application/json",
+        });
+        await conn.close();
+        return { content: [{ type: "text", text: `Cancel sent to worker \`${sid}\`. The worker will abort and return its partial result.` }] };
+      } catch (err) {
+        if (conn) await conn.close().catch(() => {});
+        return { content: [{ type: "text", text: `(error cancelling: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
   // --- tail_agent ---
   server.tool(
     "tail_agent",
