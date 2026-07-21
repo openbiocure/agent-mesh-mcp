@@ -12,6 +12,7 @@ const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5
 const RABBITMQ_MGMT_URL = process.env.RABBITMQ_MGMT_URL || "http://localhost:15672";
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
+const STATUS_EXCHANGE = "agent.status";
 
 // In-memory store for async task results
 const taskResults = new Map();
@@ -258,6 +259,72 @@ export function registerTools(server) {
       return {
         content: [{ type: "text", text: task.result }],
       };
+    }
+  );
+
+  // --- tail_agent ---
+  server.tool(
+    "tail_agent",
+    "Watch a running agent's live activity (tool calls, file reads, reasoning). Use after ask_agent(async=true) to monitor progress.",
+    {
+      name: z.string().describe("Agent name to tail (e.g. 'js-engineer', 'backend-engineer')"),
+      duration: z.number().optional().describe("Seconds to tail for (default: 30, max: 120)"),
+    },
+    async ({ name, duration }) => {
+      const seconds = Math.min(Math.max(1, duration || 30), 120);
+      let conn;
+      try {
+        conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+
+        await ch.assertExchange(STATUS_EXCHANGE, "topic", { durable: true });
+        const { queue } = await ch.assertQueue("", { exclusive: true, autoDelete: true });
+        await ch.bindQueue(queue, STATUS_EXCHANGE, `activity.${name}`);
+
+        const events = [];
+
+        await new Promise((resolve) => {
+          setTimeout(() => resolve(), seconds * 1000);
+
+          ch.consume(queue, (msg) => {
+            if (!msg) return;
+            ch.ack(msg);
+            try {
+              events.push(JSON.parse(msg.content.toString()));
+            } catch {
+              events.push({ type: "raw", content: msg.content.toString(), timestamp: new Date().toISOString() });
+            }
+          });
+        });
+
+        await conn.close();
+        conn = null;
+
+        if (events.length === 0) {
+          return {
+            content: [{ type: "text", text: `No activity from **${name}** in ${seconds}s. The agent may be idle or not running.` }],
+          };
+        }
+
+        const lines = events.map((e) => {
+          const ts = e.timestamp ? e.timestamp.split("T")[1]?.replace("Z", "").slice(0, 8) : "??:??:??";
+          const icon = e.type === "tool_call" ? "[tool]"
+            : e.type === "error" ? "[error]"
+            : e.type === "status" ? "[status]"
+            : "[text]";
+          return `${ts} ${icon} ${e.content || ""}`;
+        });
+
+        return {
+          content: [{ type: "text", text: `**Activity from ${name}** (${events.length} events in ${seconds}s):\n\n\`\`\`\n${lines.join("\n")}\n\`\`\`` }],
+        };
+      } catch (err) {
+        if (conn) await conn.close().catch(() => {});
+        return {
+          content: [{ type: "text", text: `(error tailing ${name}: ${err.message})` }],
+          isError: true,
+        };
+      }
     }
   );
 }
