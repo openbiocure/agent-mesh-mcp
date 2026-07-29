@@ -290,12 +290,13 @@ export function registerTools(server) {
   // --- tail_agent ---
   server.tool(
     "tail_agent",
-    "Watch a running agent's live activity (tool calls, file reads, reasoning). Use after ask_agent(async=true) to monitor progress.",
+    "Watch a running agent's live activity (tool calls, file reads, reasoning). Use after ask_agent(async=true) to monitor progress. Pass sid to filter to a specific worker instance.",
     {
       name: z.string().describe("Agent name to tail (e.g. 'js-engineer', 'backend-engineer')"),
       duration: z.number().optional().describe("Seconds to tail for (default: 30, max: 120)"),
+      sid: z.string().optional().describe("Worker session ID to filter events. Only shows activity from this specific worker instance."),
     },
-    async ({ name, duration }) => {
+    async ({ name, duration, sid }) => {
       const seconds = Math.min(Math.max(1, duration || 30), 120);
       let conn;
       try {
@@ -315,7 +316,10 @@ export function registerTools(server) {
             if (!msg) return;
             ch.ack(msg);
             try {
-              events.push(JSON.parse(msg.content.toString()));
+              const evt = JSON.parse(msg.content.toString());
+              // Filter by sid if provided
+              if (sid && evt.sid !== sid) return;
+              events.push(evt);
             } catch {
               events.push({ type: "raw", content: msg.content.toString(), timestamp: new Date().toISOString() });
             }
@@ -326,8 +330,9 @@ export function registerTools(server) {
         conn = null;
 
         if (events.length === 0) {
+          const target = sid ? `**${name}** (sid: ${sid})` : `**${name}**`;
           return {
-            content: [{ type: "text", text: `No activity from **${name}** in ${seconds}s. The agent may be idle or not running.` }],
+            content: [{ type: "text", text: `No activity from ${target} in ${seconds}s. The agent may be idle or not running.` }],
           };
         }
 
