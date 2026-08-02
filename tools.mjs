@@ -404,11 +404,22 @@ export function registerTools(server) {
         const pool = getPgPool();
         const id = crypto.randomUUID();
         const now = new Date().toISOString();
+        const resolvedTopic = topic.startsWith("ask.") ? topic : `ask.${topic}`;
         await pool.query(
           `INSERT INTO schedules (id, name, topic, message, cron, interval_seconds, caller_id, enabled, status, run_count, fail_count, next_run, created_by, created_at)
            VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'idle', 0, 0, $8, $9, $8)`,
-          [id, name, topic.startsWith("ask.") ? topic : `ask.${topic}`, message, cron || null, interval_seconds || null, caller_id || "scheduler", now, AGENT_NAME]
+          [id, name, resolvedTopic, message, cron || null, interval_seconds || null, caller_id || "scheduler", now, AGENT_NAME]
         );
+
+        // Publish event to RabbitMQ — a worker will pick it up and arm the timer
+        const conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+        ch.publish(EXCHANGE, "schedule.create", Buffer.from(JSON.stringify({ action: "create", schedule_id: id })), {
+          contentType: "application/json",
+        });
+        await conn.close();
+
         return { content: [{ type: "text", text: `Schedule created: \`${id}\`\n\n- **${name}** → \`${topic}\`\n- ${cron ? `Cron: \`${cron}\`` : `Every ${interval_seconds}s`}\n- Status: idle, next run: now` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error creating schedule: ${err.message})` }], isError: true };
@@ -464,6 +475,16 @@ export function registerTools(server) {
         if (rowCount === 0) {
           return { content: [{ type: "text", text: `(error: schedule \`${schedule_id}\` not found)` }], isError: true };
         }
+
+        // Notify workers to cancel the timer
+        const conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+        ch.publish(EXCHANGE, "schedule.delete", Buffer.from(JSON.stringify({ action: "delete", schedule_id })), {
+          contentType: "application/json",
+        });
+        await conn.close();
+
         return { content: [{ type: "text", text: `Schedule \`${schedule_id}\` deleted.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error deleting schedule: ${err.message})` }], isError: true };
