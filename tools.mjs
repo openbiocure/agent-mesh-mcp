@@ -26,6 +26,16 @@ function getPgPool() {
   return _pgPool;
 }
 
+// Resolve short ID prefix to full UUID
+async function resolveId(table, shortId) {
+  if (shortId.length >= 32) return shortId; // already full
+  const pool = getPgPool();
+  const { rows } = await pool.query(`SELECT id::text FROM ${table} WHERE id::text LIKE $1 LIMIT 2`, [shortId + "%"]);
+  if (rows.length === 1) return rows[0].id;
+  if (rows.length === 0) throw new Error(`No ${table} found matching '${shortId}'`);
+  throw new Error(`Ambiguous: ${rows.length} ${table} match '${shortId}'`);
+}
+
 // In-memory store for async task results
 const taskResults = new Map();
 
@@ -470,6 +480,7 @@ export function registerTools(server) {
     },
     async ({ schedule_id }) => {
       try {
+        schedule_id = await resolveId("schedules", schedule_id);
         const pool = getPgPool();
         const { rowCount } = await pool.query("DELETE FROM schedules WHERE id = $1", [schedule_id]);
         if (rowCount === 0) {
@@ -501,6 +512,7 @@ export function registerTools(server) {
     },
     async ({ schedule_id }) => {
       try {
+        schedule_id = await resolveId("schedules", schedule_id);
         const pool = getPgPool();
         const { rows } = await pool.query("SELECT name FROM schedules WHERE id = $1", [schedule_id]);
         if (rows.length === 0) {
@@ -712,6 +724,7 @@ export function registerTools(server) {
     },
     async ({ incident_id, status, severity, assigned_agent, gh_pr, summary }) => {
       try {
+        incident_id = await resolveId("incidents", incident_id);
         const pool = getPgPool();
         const sets = []; const vals = [];
         if (status) { vals.push(status); sets.push(`status = $${vals.length}`); }
@@ -746,6 +759,7 @@ export function registerTools(server) {
     },
     async ({ incident_id, gh_pr }) => {
       try {
+        incident_id = await resolveId("incidents", incident_id);
         const pool = getPgPool();
         const vals = [incident_id];
         let prSet = "";
@@ -830,6 +844,7 @@ export function registerTools(server) {
     },
     async ({ release_id }) => {
       try {
+        release_id = await resolveId("releases", release_id);
         const pool = getPgPool();
         const { rows } = await pool.query("SELECT * FROM releases WHERE id = $1", [release_id]);
         if (rows.length === 0) {
@@ -869,6 +884,7 @@ export function registerTools(server) {
     },
     async ({ release_id, prs, steps, rollback_steps, requires_migration, requires_downtime, notes, status, summary }) => {
       try {
+        release_id = await resolveId("releases", release_id);
         const pool = getPgPool();
         const sets = []; const vals = [];
         if (prs !== undefined) { vals.push(prs); sets.push(`prs = $${vals.length}`); }
@@ -908,6 +924,7 @@ export function registerTools(server) {
     },
     async ({ release_id, status, summary, duration_seconds }) => {
       try {
+        release_id = await resolveId("releases", release_id);
         const pool = getPgPool();
         const sets = [`status = $1`]; const vals = [status];
         if (summary) { vals.push(summary); sets.push(`summary = $${vals.length}`); }
@@ -919,6 +936,91 @@ export function registerTools(server) {
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
         return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` closed as **${status}**.${summary ? `\n\n${summary}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- report_mesh_bug ---
+  server.tool(
+    "report_mesh_bug",
+    "Report a bug in the mesh infrastructure. Agents should call this when they encounter mesh issues (task drops, timeouts, scheduler failures, etc).",
+    {
+      title: z.string().describe("Short bug title"),
+      description: z.string().optional().describe("Detailed description of the bug"),
+      component: z.string().optional().describe("Affected component (worker, mcp, scheduler, rabbitmq, postgres, valkey)"),
+      severity: z.enum(["low", "medium", "high", "critical"]).optional().describe("Bug severity (default: medium)"),
+    },
+    async ({ title, description, component, severity }) => {
+      try {
+        const pool = getPgPool();
+        const id = crypto.randomUUID();
+        await pool.query(
+          "INSERT INTO mesh_bugs (id, title, description, reported_by, component, severity, status) VALUES ($1, $2, $3, $4, $5, $6, 'open')",
+          [id, title, description || null, AGENT_NAME, component || null, severity || "medium"]
+        );
+        return { content: [{ type: "text", text: `Bug reported: \`${id.slice(0, 8)}\`\n\n- **${title}**\n- Component: ${component || "unknown"}\n- Severity: ${severity || "medium"}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_mesh_bugs ---
+  server.tool(
+    "list_mesh_bugs",
+    "List all reported mesh bugs, optionally filtered by status (open, acknowledged, fixed, wontfix).",
+    {
+      status: z.string().optional().describe("Filter by status"),
+    },
+    async ({ status }) => {
+      try {
+        const pool = getPgPool();
+        let sql = "SELECT id, title, component, severity, status, reported_by, created_at FROM mesh_bugs";
+        const params = [];
+        if (status) { params.push(status); sql += " WHERE status = $1"; }
+        sql += " ORDER BY CASE severity WHEN 'critical' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 ELSE 4 END, created_at DESC";
+        const { rows } = await pool.query(sql, params);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No mesh bugs${status ? ` with status '${status}'` : ""}.` }] };
+        }
+        const lines = rows.map((r) =>
+          `- **[${r.severity}]** ${r.title} (\`${r.id.slice(0, 8)}\`) — ${r.status}\n    Component: ${r.component || "?"} | Reported by: ${r.reported_by} | ${new Date(r.created_at).toISOString().slice(0, 19)}`
+        );
+        return { content: [{ type: "text", text: `**Mesh Bugs (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- update_mesh_bug ---
+  server.tool(
+    "update_mesh_bug",
+    "Update a mesh bug — change status, add fix notes.",
+    {
+      bug_id: z.string().describe("Bug UUID"),
+      status: z.string().optional().describe("New status (open, acknowledged, fixed, wontfix)"),
+      fix_notes: z.string().optional().describe("Notes on the fix"),
+    },
+    async ({ bug_id, status, fix_notes }) => {
+      try {
+        bug_id = await resolveId("mesh_bugs", bug_id);
+        const pool = getPgPool();
+        const sets = []; const vals = [];
+        if (status) { vals.push(status); sets.push(`status = $${vals.length}`); }
+        if (fix_notes) { vals.push(fix_notes); sets.push(`fix_notes = $${vals.length}`); }
+        if (status === "fixed") { sets.push("resolved_at = now()"); }
+        if (sets.length === 0) {
+          return { content: [{ type: "text", text: "(nothing to update)" }] };
+        }
+        vals.push(bug_id);
+        const { rowCount } = await pool.query(`UPDATE mesh_bugs SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: bug \`${bug_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Bug \`${bug_id.slice(0, 8)}\` updated.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
       }
