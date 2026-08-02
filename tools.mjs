@@ -198,7 +198,7 @@ export function registerTools(server) {
           });
 
           return {
-            content: [{ type: "text", text: `Task accepted. ID: \`${taskId}\`${ackSid ? ` | sid: \`${ackSid}\`` : ""}\n\nUse \`get_task_result("${taskId}")\` to poll for the result.${ackSid ? ` Use \`tail_agent("${name}", sid="${ackSid}")\` to watch live.` : ""}` }],
+            content: [{ type: "text", text: `Task accepted. ID: \`${taskId}\`${ackSid ? ` | sid: \`${ackSid}\`` : ""}\n\nUse \`get_task_result("${taskId}")\` to poll for the result.${ackSid ? ` Use \`tail_agent(sid="${ackSid}")\` to watch live.` : ""}` }],
           };
         }
 
