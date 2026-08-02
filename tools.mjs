@@ -560,4 +560,204 @@ export function registerTools(server) {
       }
     }
   );
+
+  // --- sync_prompt ---
+  server.tool(
+    "sync_prompt",
+    "Sync an agent's prompt from a file into the database. Workers will pick up the new prompt on next session rotation (no deploy needed).",
+    {
+      agent_name: z.string().describe("Agent name (e.g. 'backend-engineer', 'prod-bug-hunter')"),
+      content: z.string().describe("The full prompt content to sync"),
+      source_file: z.string().optional().describe("Original file path for reference"),
+    },
+    async ({ agent_name, content, source_file }) => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT version FROM prompts WHERE agent_name = $1", [agent_name]);
+        if (rows.length > 0) {
+          const newVersion = (rows[0].version || 0) + 1;
+          await pool.query(
+            "UPDATE prompts SET content = $1, version = $2, source_file = $3, updated_by = $4, updated_at = now() WHERE agent_name = $5",
+            [content, newVersion, source_file || null, AGENT_NAME, agent_name]
+          );
+          return { content: [{ type: "text", text: `Prompt for **${agent_name}** updated to v${newVersion} (${content.length} chars). Workers will use it on next session.` }] };
+        } else {
+          await pool.query(
+            "INSERT INTO prompts (id, agent_name, content, version, source_file, updated_by) VALUES ($1, $2, $3, 1, $4, $5)",
+            [crypto.randomUUID(), agent_name, content, source_file || null, AGENT_NAME]
+          );
+          return { content: [{ type: "text", text: `Prompt for **${agent_name}** created (v1, ${content.length} chars). Workers will use it on next session.` }] };
+        }
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error syncing prompt: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- get_prompt ---
+  server.tool(
+    "get_prompt",
+    "Get the current prompt for an agent from the database.",
+    {
+      agent_name: z.string().describe("Agent name"),
+    },
+    async ({ agent_name }) => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT content, version, source_file, updated_by, updated_at FROM prompts WHERE agent_name = $1", [agent_name]);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No prompt in DB for **${agent_name}**. Worker is using file-based prompt.` }] };
+        }
+        const r = rows[0];
+        return { content: [{ type: "text", text: `**${agent_name}** prompt (v${r.version}, ${r.content.length} chars)\nSource: ${r.source_file || "n/a"} | Updated by: ${r.updated_by} | ${r.updated_at}\n\n---\n\n${r.content}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_prompts ---
+  server.tool(
+    "list_prompts",
+    "List all agent prompts stored in the database with version info.",
+    {},
+    async () => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT agent_name, version, length(content) as chars, source_file, updated_by, updated_at FROM prompts ORDER BY agent_name");
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: "No prompts in DB. All workers are using file-based prompts." }] };
+        }
+        const lines = rows.map((r) => `- **${r.agent_name}** v${r.version} (${r.chars} chars) — ${r.source_file || "no source"} — updated by ${r.updated_by} at ${new Date(r.updated_at).toISOString().slice(0, 19)}`);
+        return { content: [{ type: "text", text: `**Prompts (${rows.length}):**\n\n${lines.join("\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- create_incident ---
+  server.tool(
+    "create_incident",
+    "Track a new P1/P2/P3 incident. Links to a GitHub issue and assigns an agent to investigate.",
+    {
+      repo: z.string().describe("GitHub repo (e.g. 'openbiocure/obc-connectors-core')"),
+      title: z.string().describe("Short incident title"),
+      severity: z.enum(["p1", "p2", "p3"]).describe("Severity level"),
+      gh_issue: z.number().optional().describe("GitHub issue number"),
+      summary: z.string().optional().describe("Incident summary/description"),
+      assigned_agent: z.string().optional().describe("Agent to investigate (e.g. 'backend-engineer')"),
+    },
+    async ({ repo, title, severity, gh_issue, summary, assigned_agent }) => {
+      try {
+        const pool = getPgPool();
+        const id = crypto.randomUUID();
+        await pool.query(
+          `INSERT INTO incidents (id, repo, title, severity, gh_issue, summary, assigned_agent, status, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'open', $8)`,
+          [id, repo, title, severity, gh_issue || null, summary || null, assigned_agent || null, AGENT_NAME]
+        );
+        const ghRef = gh_issue ? ` (${repo}#${gh_issue})` : "";
+        return { content: [{ type: "text", text: `Incident created: \`${id.slice(0, 8)}\`\n\n- **[${severity.toUpperCase()}]** ${title}${ghRef}\n- Status: open${assigned_agent ? `\n- Assigned: ${assigned_agent}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error creating incident: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_incidents ---
+  server.tool(
+    "list_incidents",
+    "List tracked incidents, optionally filtered by severity or status.",
+    {
+      severity: z.enum(["p1", "p2", "p3"]).optional().describe("Filter by severity"),
+      status: z.string().optional().describe("Filter by status (open, investigating, fix_submitted, resolved)"),
+    },
+    async ({ severity, status }) => {
+      try {
+        const pool = getPgPool();
+        let sql = "SELECT id, repo, gh_issue, gh_pr, severity, status, title, assigned_agent, created_at, updated_at FROM incidents WHERE 1=1";
+        const params = [];
+        if (severity) { params.push(severity); sql += ` AND severity = $${params.length}`; }
+        if (status) { params.push(status); sql += ` AND status = $${params.length}`; }
+        sql += " ORDER BY CASE severity WHEN 'p1' THEN 1 WHEN 'p2' THEN 2 ELSE 3 END, created_at DESC";
+        const { rows } = await pool.query(sql, params);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No incidents found${severity ? ` with severity ${severity}` : ""}${status ? ` with status ${status}` : ""}.` }] };
+        }
+        const lines = rows.map((r) => {
+          const gh = r.gh_issue ? `${r.repo}#${r.gh_issue}` : r.repo;
+          const pr = r.gh_pr ? ` → PR #${r.gh_pr}` : "";
+          const agent = r.assigned_agent ? ` → ${r.assigned_agent}` : "";
+          return `- **[${r.severity.toUpperCase()}]** ${r.title} (\`${r.id.slice(0, 8)}\`)\n    ${gh}${pr} | ${r.status}${agent}`;
+        });
+        return { content: [{ type: "text", text: `**Incidents (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- update_incident ---
+  server.tool(
+    "update_incident",
+    "Update an incident's status, severity, assigned agent, or link a PR.",
+    {
+      incident_id: z.string().describe("Incident UUID (use list_incidents to find)"),
+      status: z.string().optional().describe("New status (open, investigating, fix_submitted, resolved)"),
+      severity: z.enum(["p1", "p2", "p3"]).optional().describe("New severity"),
+      assigned_agent: z.string().optional().describe("Assign to an agent"),
+      gh_pr: z.number().optional().describe("Link a fix PR"),
+      summary: z.string().optional().describe("Update summary"),
+    },
+    async ({ incident_id, status, severity, assigned_agent, gh_pr, summary }) => {
+      try {
+        const pool = getPgPool();
+        const sets = []; const vals = [];
+        if (status) { vals.push(status); sets.push(`status = $${vals.length}`); }
+        if (severity) { vals.push(severity); sets.push(`severity = $${vals.length}`); }
+        if (assigned_agent) { vals.push(assigned_agent); sets.push(`assigned_agent = $${vals.length}`); }
+        if (gh_pr) { vals.push(gh_pr); sets.push(`gh_pr = $${vals.length}`); }
+        if (summary) { vals.push(summary); sets.push(`summary = $${vals.length}`); }
+        if (status === "resolved") { sets.push("resolved_at = now()"); }
+        sets.push("updated_at = now()");
+        if (sets.length === 1) {
+          return { content: [{ type: "text", text: "(error: nothing to update)" }], isError: true };
+        }
+        vals.push(incident_id);
+        const { rowCount } = await pool.query(`UPDATE incidents SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: incident \`${incident_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Incident \`${incident_id.slice(0, 8)}\` updated.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- resolve_incident ---
+  server.tool(
+    "resolve_incident",
+    "Mark an incident as resolved, optionally linking the fix PR.",
+    {
+      incident_id: z.string().describe("Incident UUID"),
+      gh_pr: z.number().optional().describe("GitHub PR number that fixes this"),
+    },
+    async ({ incident_id, gh_pr }) => {
+      try {
+        const pool = getPgPool();
+        const vals = [incident_id];
+        let prSet = "";
+        if (gh_pr) { vals.push(gh_pr); prSet = `, gh_pr = $${vals.length}`; }
+        const { rowCount } = await pool.query(`UPDATE incidents SET status = 'resolved', resolved_at = now()${prSet}, updated_at = now() WHERE id = $1`, vals);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: incident \`${incident_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Incident \`${incident_id.slice(0, 8)}\` resolved.${gh_pr ? ` Fix: PR #${gh_pr}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
 }
