@@ -760,4 +760,168 @@ export function registerTools(server) {
       }
     }
   );
+
+  // --- create_release ---
+  server.tool(
+    "create_release",
+    "Create a release — a deployment runbook you build up as you develop a feature. Add PRs and steps over time, then tell devops to deploy when ready.",
+    {
+      name: z.string().describe("Release name (e.g. 'LLM model picker')"),
+      prs: z.array(z.string()).optional().describe("PR references (e.g. ['openbiocure/obc-connectors-core#45', 'openbiocure/platform-ui#12'])"),
+      steps: z.string().optional().describe("Deployment steps as markdown checklist"),
+      requires_migration: z.boolean().optional().describe("Does this release require a DB migration?"),
+      requires_downtime: z.boolean().optional().describe("Does this release require downtime?"),
+      notes: z.string().optional().describe("Dev notes"),
+    },
+    async ({ name, prs, steps, requires_migration, requires_downtime, notes }) => {
+      try {
+        const pool = getPgPool();
+        const id = crypto.randomUUID();
+        await pool.query(
+          `INSERT INTO releases (id, name, prs, steps, requires_migration, requires_downtime, notes, status, created_by)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'building', $8)`,
+          [id, name, prs || [], steps || null, requires_migration || false, requires_downtime || false, notes || null, AGENT_NAME]
+        );
+        const flags = [requires_migration && "migration", requires_downtime && "downtime"].filter(Boolean);
+        return { content: [{ type: "text", text: `Release created: \`${id.slice(0, 8)}\`\n\n- **${name}**\n- PRs: ${(prs || []).join(", ") || "none yet"}\n- Status: building${flags.length ? `\n- Flags: ${flags.join(", ")}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_releases ---
+  server.tool(
+    "list_releases",
+    "List all releases, optionally filtered by status (building, ready, deploying, deployed, failed, rolled_back).",
+    {
+      status: z.string().optional().describe("Filter by status"),
+    },
+    async ({ status }) => {
+      try {
+        const pool = getPgPool();
+        let sql = "SELECT id, name, prs, status, requires_migration, requires_downtime, summary, duration_seconds, created_at, deployed_at FROM releases";
+        const params = [];
+        if (status) { params.push(status); sql += ` WHERE status = $1`; }
+        sql += " ORDER BY created_at DESC";
+        const { rows } = await pool.query(sql, params);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No releases${status ? ` with status '${status}'` : ""}.` }] };
+        }
+        const lines = rows.map((r) => {
+          const flags = [r.requires_migration && "migration", r.requires_downtime && "downtime"].filter(Boolean);
+          const prs = (r.prs || []).join(", ") || "no PRs";
+          const dur = r.duration_seconds ? ` (${Math.round(r.duration_seconds)}s)` : "";
+          return `- **${r.name}** (\`${r.id.slice(0, 8)}\`) — ${r.status}${dur}\n    PRs: ${prs}${flags.length ? ` | Flags: ${flags.join(", ")}` : ""}${r.summary ? `\n    Summary: ${r.summary.slice(0, 100)}` : ""}`;
+        });
+        return { content: [{ type: "text", text: `**Releases (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- get_release ---
+  server.tool(
+    "get_release",
+    "Get full details of a release including steps, rollback plan, and notes.",
+    {
+      release_id: z.string().describe("Release UUID"),
+    },
+    async ({ release_id }) => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT * FROM releases WHERE id = $1", [release_id]);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
+        }
+        const r = rows[0];
+        const flags = [r.requires_migration && "requires migration", r.requires_downtime && "requires downtime"].filter(Boolean);
+        let text = `# ${r.name}\n\n**Status:** ${r.status} | **Created:** ${new Date(r.created_at).toISOString().slice(0, 19)}\n`;
+        if (flags.length) text += `**Flags:** ${flags.join(", ")}\n`;
+        text += `**PRs:** ${(r.prs || []).join(", ") || "none"}\n`;
+        if (r.steps) text += `\n## Deploy Steps\n${r.steps}\n`;
+        if (r.rollback_steps) text += `\n## Rollback\n${r.rollback_steps}\n`;
+        if (r.notes) text += `\n## Notes\n${r.notes}\n`;
+        if (r.summary) text += `\n## Summary\n${r.summary}\n`;
+        if (r.duration_seconds) text += `\n**Duration:** ${Math.round(r.duration_seconds)}s\n`;
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- update_release ---
+  server.tool(
+    "update_release",
+    "Update a release — add PRs, edit steps, change status, add notes. Use this as you build the feature.",
+    {
+      release_id: z.string().describe("Release UUID"),
+      prs: z.array(z.string()).optional().describe("Replace PR list"),
+      steps: z.string().optional().describe("Replace deployment steps"),
+      rollback_steps: z.string().optional().describe("Replace rollback steps"),
+      requires_migration: z.boolean().optional(),
+      requires_downtime: z.boolean().optional(),
+      notes: z.string().optional().describe("Replace notes"),
+      status: z.string().optional().describe("Change status (building, ready, deploying, deployed, failed, rolled_back)"),
+      summary: z.string().optional().describe("Post-deploy summary"),
+    },
+    async ({ release_id, prs, steps, rollback_steps, requires_migration, requires_downtime, notes, status, summary }) => {
+      try {
+        const pool = getPgPool();
+        const sets = []; const vals = [];
+        if (prs !== undefined) { vals.push(prs); sets.push(`prs = $${vals.length}`); }
+        if (steps !== undefined) { vals.push(steps); sets.push(`steps = $${vals.length}`); }
+        if (rollback_steps !== undefined) { vals.push(rollback_steps); sets.push(`rollback_steps = $${vals.length}`); }
+        if (requires_migration !== undefined) { vals.push(requires_migration); sets.push(`requires_migration = $${vals.length}`); }
+        if (requires_downtime !== undefined) { vals.push(requires_downtime); sets.push(`requires_downtime = $${vals.length}`); }
+        if (notes !== undefined) { vals.push(notes); sets.push(`notes = $${vals.length}`); }
+        if (status) { vals.push(status); sets.push(`status = $${vals.length}`); }
+        if (summary) { vals.push(summary); sets.push(`summary = $${vals.length}`); }
+        if (status === "deploying") { sets.push("started_at = now()"); }
+        if (status === "deployed") { sets.push("deployed_at = now()"); }
+        if (sets.length === 0) {
+          return { content: [{ type: "text", text: "(nothing to update)" }] };
+        }
+        vals.push(release_id);
+        const { rowCount } = await pool.query(`UPDATE releases SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` updated.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- close_release ---
+  server.tool(
+    "close_release",
+    "Close a release as deployed, failed, or rolled back. Include a summary of what happened.",
+    {
+      release_id: z.string().describe("Release UUID"),
+      status: z.enum(["deployed", "failed", "rolled_back"]).describe("Final status"),
+      summary: z.string().optional().describe("What happened during deployment"),
+      duration_seconds: z.number().optional().describe("How long the deployment took"),
+    },
+    async ({ release_id, status, summary, duration_seconds }) => {
+      try {
+        const pool = getPgPool();
+        const sets = [`status = $1`]; const vals = [status];
+        if (summary) { vals.push(summary); sets.push(`summary = $${vals.length}`); }
+        if (duration_seconds !== undefined) { vals.push(duration_seconds); sets.push(`duration_seconds = $${vals.length}`); }
+        if (status === "deployed") { sets.push("deployed_at = now()"); }
+        vals.push(release_id);
+        const { rowCount } = await pool.query(`UPDATE releases SET ${sets.join(", ")} WHERE id = $${vals.length}`, vals);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` closed as **${status}**.${summary ? `\n\n${summary}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
 }
