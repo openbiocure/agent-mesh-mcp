@@ -386,4 +386,127 @@ export function registerTools(server) {
       }
     }
   );
+
+  // --- create_schedule ---
+  server.tool(
+    "create_schedule",
+    "Create a recurring scheduled task. The scheduler dispatches it to the specified topic on the cron or interval you set. Use list_schedules() to see existing ones.",
+    {
+      name: z.string().describe("Human-readable name for this schedule (e.g. 'daily-bug-check')"),
+      topic: z.string().describe("Topic to dispatch to (e.g. 'datalake', 'prod')"),
+      message: z.string().describe("The message to send to the agent on each run"),
+      cron: z.string().optional().describe("Cron expression (e.g. '0 9 * * *' for daily at 9am UTC). Mutually exclusive with interval_seconds."),
+      interval_seconds: z.number().optional().describe("Run every N seconds. Mutually exclusive with cron."),
+      caller_id: z.string().optional().describe("Caller identity for the scheduled task (default: 'scheduler')"),
+    },
+    async ({ name, topic, message, cron, interval_seconds, caller_id }) => {
+      try {
+        const pool = getPgPool();
+        const id = crypto.randomUUID();
+        const now = new Date().toISOString();
+        await pool.query(
+          `INSERT INTO schedules (id, name, topic, message, cron, interval_seconds, caller_id, enabled, status, run_count, fail_count, next_run, created_by, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, true, 'idle', 0, 0, $8, $9, $8)`,
+          [id, name, topic.startsWith("ask.") ? topic : `ask.${topic}`, message, cron || null, interval_seconds || null, caller_id || "scheduler", now, AGENT_NAME]
+        );
+        return { content: [{ type: "text", text: `Schedule created: \`${id}\`\n\n- **${name}** → \`${topic}\`\n- ${cron ? `Cron: \`${cron}\`` : `Every ${interval_seconds}s`}\n- Status: idle, next run: now` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error creating schedule: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_schedules ---
+  server.tool(
+    "list_schedules",
+    "List all scheduled tasks and their current state (status, last result, run/fail counts, next run time).",
+    {},
+    async () => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query(
+          `SELECT id, name, topic, substring(message from 1 for 80) as message, cron, interval_seconds,
+                  enabled, status, last_task_id, substring(last_result from 1 for 100) as last_result,
+                  last_error, run_count, fail_count, last_run, next_run
+           FROM schedules ORDER BY created_at DESC`
+        );
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: "No schedules configured." }] };
+        }
+        const lines = rows.map((r) => {
+          const freq = r.cron ? `cron: \`${r.cron}\`` : `every ${r.interval_seconds}s`;
+          const status = r.enabled ? r.status : "disabled";
+          const lastRun = r.last_run ? new Date(r.last_run).toISOString().replace("T", " ").slice(0, 19) : "never";
+          const nextRun = r.next_run ? new Date(r.next_run).toISOString().replace("T", " ").slice(0, 19) : "—";
+          let state = `${status} | runs: ${r.run_count} | fails: ${r.fail_count}`;
+          if (r.last_result) state += `\n    Last result: ${r.last_result}`;
+          if (r.last_error) state += `\n    Last error: ${r.last_error}`;
+          return `- **${r.name}** (\`${r.id.slice(0, 8)}\`) → \`${r.topic}\` | ${freq}\n    ${state}\n    Last: ${lastRun} | Next: ${nextRun}`;
+        });
+        return { content: [{ type: "text", text: `**Schedules (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error listing schedules: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- delete_schedule ---
+  server.tool(
+    "delete_schedule",
+    "Delete a scheduled task by its ID (use list_schedules to find IDs).",
+    {
+      schedule_id: z.string().describe("Schedule UUID to delete"),
+    },
+    async ({ schedule_id }) => {
+      try {
+        const pool = getPgPool();
+        const { rowCount } = await pool.query("DELETE FROM schedules WHERE id = $1", [schedule_id]);
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: schedule \`${schedule_id}\` not found)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Schedule \`${schedule_id}\` deleted.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error deleting schedule: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- search_conversations ---
+  server.tool(
+    "search_conversations",
+    "Search past conversations across all agents using full-text search. Returns matching turns with context (who said what, when, to which agent).",
+    {
+      query: z.string().describe("Search query — keywords or phrases to find in past conversations"),
+      worker_name: z.string().optional().describe("Filter to a specific agent (e.g. 'backend-engineer')"),
+      limit: z.number().optional().describe("Max results to return (default: 10)"),
+    },
+    async ({ query, worker_name, limit: maxResults }) => {
+      try {
+        const pool = getPgPool();
+        const n = Math.min(maxResults || 10, 50);
+        let sql = `SELECT id, worker_name, caller_id, role, substring(content from 1 for 300) as content, timestamp
+                    FROM conversations
+                    WHERE content ILIKE $1`;
+        const params = [`%${query}%`];
+        if (worker_name) {
+          sql += ` AND worker_name = $${params.length + 1}`;
+          params.push(worker_name);
+        }
+        sql += ` ORDER BY timestamp DESC LIMIT $${params.length + 1}`;
+        params.push(n);
+
+        const { rows } = await pool.query(sql, params);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No conversations found matching "${query}".` }] };
+        }
+        const lines = rows.map((r) => {
+          const ts = r.timestamp ? new Date(r.timestamp).toISOString().replace("T", " ").slice(0, 19) : "?";
+          return `**${ts}** | ${r.worker_name} | ${r.caller_id} (${r.role}):\n${r.content}`;
+        });
+        return { content: [{ type: "text", text: `**Conversations matching "${query}"** (${rows.length} results):\n\n${lines.join("\n\n---\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error searching conversations: ${err.message})` }], isError: true };
+      }
+    }
+  );
 }
