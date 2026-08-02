@@ -6,6 +6,7 @@
 import { z } from "zod";
 import amqplib from "amqplib";
 import crypto from "crypto";
+import pg from "pg";
 
 const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
@@ -13,6 +14,17 @@ const RABBITMQ_MGMT_URL = process.env.RABBITMQ_MGMT_URL || "http://localhost:156
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
 const STATUS_EXCHANGE = "agent.status";
+const MESH_DB_URL = process.env.MESH_DB_URL || "postgresql://postgres:postgres@postgres.lab/obc_mesh";
+
+// Postgres pool for task result fallback
+let _pgPool = null;
+function getPgPool() {
+  if (!_pgPool) {
+    _pgPool = new pg.Pool({ connectionString: MESH_DB_URL, max: 3 });
+    _pgPool.on("error", () => { _pgPool = null; });
+  }
+  return _pgPool;
+}
 
 // In-memory store for async task results
 const taskResults = new Map();
@@ -160,8 +172,8 @@ export function registerTools(server) {
             return { content: [{ type: "text", text: "(error: no ack received for async task)" }], isError: true };
           }
 
-          let taskId;
-          try { taskId = JSON.parse(ack).task_id; } catch { taskId = null; }
+          let taskId, ackSid;
+          try { const d = JSON.parse(ack); taskId = d.task_id; ackSid = d.sid; } catch { taskId = null; }
 
           if (!taskId) {
             return { content: [{ type: "text", text: ack }] };
@@ -186,7 +198,7 @@ export function registerTools(server) {
           });
 
           return {
-            content: [{ type: "text", text: `Task accepted. ID: \`${taskId}\`\n\nUse \`get_task_result("${taskId}")\` to poll for the result.` }],
+            content: [{ type: "text", text: `Task accepted. ID: \`${taskId}\`${ackSid ? ` | sid: \`${ackSid}\`` : ""}\n\nUse \`get_task_result("${taskId}")\` to poll for the result.${ackSid ? ` Use \`tail_agent("${name}", sid="${ackSid}")\` to watch live.` : ""}` }],
           };
         }
 
@@ -239,26 +251,43 @@ export function registerTools(server) {
       task_id: z.string().describe("The task ID returned by ask_agent when async=true."),
     },
     async ({ task_id }) => {
+      // Try in-memory first
       const task = taskResults.get(task_id);
-      if (!task) {
+      if (task) {
+        if (task.status === "processing") {
+          return {
+            content: [{ type: "text", text: `Task \`${task_id}\` is still processing. Try again in a few seconds.` }],
+          };
+        }
+        taskResults.delete(task_id);
+        return { content: [{ type: "text", text: task.result }] };
+      }
+
+      // Fallback to postgres
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query(
+          "SELECT status, result FROM tasks WHERE task_id = $1", [task_id]
+        );
+        if (rows.length === 0) {
+          return {
+            content: [{ type: "text", text: `(error: unknown task_id "${task_id}")` }],
+            isError: true,
+          };
+        }
+        const row = rows[0];
+        if (row.status === "accepted" || row.status === "processing") {
+          return {
+            content: [{ type: "text", text: `Task \`${task_id}\` is still ${row.status}. Try again in a few seconds.` }],
+          };
+        }
+        return { content: [{ type: "text", text: row.result || `(task ${row.status} with no result)` }] };
+      } catch (dbErr) {
         return {
-          content: [{ type: "text", text: `(error: unknown task_id "${task_id}")` }],
+          content: [{ type: "text", text: `(error: task_id "${task_id}" not found in memory, DB fallback failed: ${dbErr.message})` }],
           isError: true,
         };
       }
-
-      if (task.status === "processing") {
-        return {
-          content: [{ type: "text", text: `Task \`${task_id}\` is still processing. Try again in a few seconds.` }],
-        };
-      }
-
-      // Clean up after retrieval
-      taskResults.delete(task_id);
-
-      return {
-        content: [{ type: "text", text: task.result }],
-      };
     }
   );
 
