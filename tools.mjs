@@ -492,6 +492,36 @@ export function registerTools(server) {
     }
   );
 
+  // --- run_schedule ---
+  server.tool(
+    "run_schedule",
+    "Fire a schedule immediately, regardless of its next_run time. The owning worker will dispatch the task right away.",
+    {
+      schedule_id: z.string().describe("Schedule UUID to fire now (use list_schedules to find IDs)"),
+    },
+    async ({ schedule_id }) => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT name FROM schedules WHERE id = $1", [schedule_id]);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `(error: schedule \`${schedule_id}\` not found)` }], isError: true };
+        }
+
+        const conn = await amqplib.connect(RABBITMQ_URL);
+        const ch = await conn.createChannel();
+        await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+        ch.publish(EXCHANGE, "schedule.run_now", Buffer.from(JSON.stringify({ action: "run_now", schedule_id })), {
+          contentType: "application/json",
+        });
+        await conn.close();
+
+        return { content: [{ type: "text", text: `Fired schedule \`${rows[0].name}\` (\`${schedule_id.slice(0, 8)}\`). A worker will dispatch it now.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error firing schedule: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
   // --- search_conversations ---
   server.tool(
     "search_conversations",
