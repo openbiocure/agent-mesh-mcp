@@ -132,7 +132,14 @@ export function registerTools(server) {
   // --- ask_agent ---
   server.tool(
     "ask_agent",
-    "Ask another agent a question via RabbitMQ. Use list_agents() first to see available topics. For long tasks, set async=true to get a task_id back immediately and poll with get_task_result. Use sid to route to a specific worker instance for multi-turn conversations.",
+    `Ask another agent a question via RabbitMQ.
+
+Examples:
+  ask_agent(topic="datalake", message="What tables have failing rows?")
+  ask_agent(topic="prod-ops", message="Check disk usage on prod", async=true)
+  ask_agent(topic="platform", message="Fix the login bug", sid="w-abc123")
+
+Use list_agents() first to see available topics. For long tasks, set async=true to get a task_id immediately — poll with get_task_result(task_id). Pass sid from a previous response for multi-turn conversations with the same worker.`,
     {
       topic: z.string().describe("The topic to route the question to."),
       message: z.string().describe("The message to send to the other agent"),
@@ -400,7 +407,14 @@ export function registerTools(server) {
   // --- create_schedule ---
   server.tool(
     "create_schedule",
-    "Create a recurring scheduled task. The scheduler dispatches it to the specified topic on the cron or interval you set. Use list_schedules() to see existing ones.",
+    `Create a recurring scheduled task. A mesh worker will pick it up and arm a timer.
+
+Examples:
+  create_schedule(name="daily-bug-check", topic="datalake", message="Run the P1 bug sweep", cron="0 9 * * *")
+  create_schedule(name="deploy-watcher", topic="prod-ops", message="Check for ready releases", interval_seconds=300)
+  create_schedule(name="health-ping", topic="agent-ui", message="Reply with: pong", interval_seconds=60)
+
+Use list_schedules() to see existing ones. Use run_schedule(id) to fire one immediately. Use delete_schedule(id) to remove.`,
     {
       name: z.string().describe("Human-readable name for this schedule (e.g. 'daily-bug-check')"),
       topic: z.string().describe("Topic to dispatch to (e.g. 'datalake', 'prod')"),
@@ -537,7 +551,14 @@ export function registerTools(server) {
   // --- search_conversations ---
   server.tool(
     "search_conversations",
-    "Search past conversations across all agents using full-text search. Returns matching turns with context (who said what, when, to which agent).",
+    `Search past conversations across all agents. Returns matching turns with context.
+
+Examples:
+  search_conversations(query="migration", worker_name="backend-engineer")
+  search_conversations(query="deploy failed", limit=5)
+  search_conversations(query="citation-ingestion")
+
+Searches all agents by default. Filter by worker_name to narrow results.`,
     {
       query: z.string().describe("Search query — keywords or phrases to find in past conversations"),
       worker_name: z.string().optional().describe("Filter to a specific agent (e.g. 'backend-engineer')"),
@@ -576,7 +597,12 @@ export function registerTools(server) {
   // --- sync_prompt ---
   server.tool(
     "sync_prompt",
-    "Sync an agent's prompt from a file into the database. Workers will pick up the new prompt on next session rotation (no deploy needed).",
+    `Sync an agent's prompt into the database. Workers pick it up on next session rotation — no deploy needed.
+
+Examples:
+  sync_prompt(agent_name="backend-engineer", content="You are a backend engineer...", source_file=".claude/agents/backend-engineer.md")
+
+Use get_prompt(agent_name) to see current prompt. Use list_prompts() to see all synced prompts.`,
     {
       agent_name: z.string().describe("Agent name (e.g. 'backend-engineer', 'prod-bug-hunter')"),
       content: z.string().describe("The full prompt content to sync"),
@@ -651,7 +677,13 @@ export function registerTools(server) {
   // --- create_incident ---
   server.tool(
     "create_incident",
-    "Track a new P1/P2/P3 incident. Links to a GitHub issue and assigns an agent to investigate.",
+    `Track a new P1/P2/P3 incident. Links to a GitHub issue and assigns an agent.
+
+Examples:
+  create_incident(repo="openbiocure/obc-connectors-core", title="API 500 on /models", severity="p1", gh_issue=380, assigned_agent="backend-engineer")
+  create_incident(repo="openbiocure/platform-ui", title="Login redirect broken", severity="p2")
+
+Use list_incidents() to see tracked incidents. Use update_incident() to change status/assignment. Use resolve_incident() when fixed.`,
     {
       repo: z.string().describe("GitHub repo (e.g. 'openbiocure/obc-connectors-core')"),
       title: z.string().describe("Short incident title"),
@@ -778,7 +810,13 @@ export function registerTools(server) {
   // --- create_release ---
   server.tool(
     "create_release",
-    "Create a release — a deployment runbook you build up as you develop a feature. Add PRs and steps over time, then tell devops to deploy when ready.",
+    `Create a release — a deployment runbook you build up during development.
+
+Examples:
+  create_release(name="LLM model picker", prs=["openbiocure/obc-connectors-core#45", "openbiocure/platform-ui#12"], requires_migration=true)
+  create_release(name="Dead code cleanup", prs=["openbiocure/obc-connectors-core#391"])
+
+Workflow: create (building) → add PRs/steps with update_release → mark ready → tell devops "deploy release <id>" → close_release when done.`,
     {
       name: z.string().describe("Release name (e.g. 'LLM model picker')"),
       prs: z.array(z.string()).optional().describe("PR references (e.g. ['openbiocure/obc-connectors-core#45', 'openbiocure/platform-ui#12'])"),
@@ -945,7 +983,13 @@ export function registerTools(server) {
   // --- report_mesh_bug ---
   server.tool(
     "report_mesh_bug",
-    "Report a bug in the mesh infrastructure. Agents should call this when they encounter mesh issues (task drops, timeouts, scheduler failures, etc).",
+    `Report a bug in the mesh infrastructure. Call this when you encounter mesh issues.
+
+Examples:
+  report_mesh_bug(title="Tasks dropping on async dispatch", component="scheduler", severity="high")
+  report_mesh_bug(title="get_task_result returns unknown ID", component="mcp", description="Task was dispatched but result lost after MCP session expired")
+
+Components: worker, mcp, scheduler, rabbitmq, postgres, valkey. Use list_mesh_bugs() to see reported bugs.`,
     {
       title: z.string().describe("Short bug title"),
       description: z.string().optional().describe("Detailed description of the bug"),
