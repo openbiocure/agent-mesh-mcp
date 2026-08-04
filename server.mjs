@@ -20,8 +20,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import crypto from "crypto";
+import { execSync } from "child_process";
 import express from "express";
 import { registerTools } from "./tools/index.mjs";
+
+const BUILD = (() => { try { return execSync("git rev-parse --short=7 HEAD", { stdio: ["pipe","pipe","ignore"] }).toString().trim(); } catch { return "unknown"; } })();
 import { telegramWebhookHandler } from "./lib/telegram.mjs";
 
 // --- Config ---
@@ -228,10 +231,10 @@ app.post("/telegram/webhook", telegramWebhookHandler);
 
 // Health check (no auth)
 app.get("/health", (req, res) => {
-  res.json({ status: "ok", sessions: transports.size });
+  res.json({ status: "ok", build: BUILD, sessions: transports.size });
 });
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Agent Mesh MCP (HTTP) listening on :${PORT}`);
+  console.log(`Agent Mesh MCP (HTTP) listening on :${PORT} (build ${BUILD})`);
   console.log(`Keycloak: ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}`);
 });
