@@ -281,6 +281,23 @@ app.post("/telegram/webhook", async (req, res) => {
       return;
     }
 
+    // Check allowed users from DB
+    const chatId = String(callback.from.id);
+    try {
+      const pool = getServerPgPool();
+      const { rows } = await pool.query("SELECT value FROM mesh_settings WHERE key = 'TELEGRAM_ALLOWED_USERS'");
+      const allowed = rows.length > 0 ? rows[0].value.split(",").map(s => s.trim()) : [TELEGRAM_CHAT_ID];
+      if (!allowed.includes(chatId)) {
+        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ callback_query_id: callback.id, text: "Not authorized", show_alert: true }),
+        });
+        res.json({ ok: true });
+        return;
+      }
+    } catch { /* if DB fails, fall through with default check */ }
+
     // Button callback
     const data = callback.data;
     const [action, approvalId] = data.split(":");
