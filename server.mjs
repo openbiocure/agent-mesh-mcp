@@ -225,6 +225,103 @@ app.delete("/mcp", async (req, res) => {
   }
 });
 
+// --- Telegram webhook (no auth — Telegram sends callbacks here) ---
+
+import pg from "pg";
+
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8808069971:AAHGimNxHN7GssOterrZjU-pHSvZ78IsoCo";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "1329256217";
+const MESH_DB_URL_SERVER = process.env.MESH_DB_URL || "postgresql://postgres:postgres@postgres.lab/obc_mesh";
+
+let _pgPoolServer = null;
+function getServerPgPool() {
+  if (!_pgPoolServer) {
+    _pgPoolServer = new pg.Pool({ connectionString: MESH_DB_URL_SERVER, max: 2 });
+    _pgPoolServer.on("error", () => { _pgPoolServer = null; });
+  }
+  return _pgPoolServer;
+}
+
+app.use(express.json());
+
+app.post("/telegram/webhook", async (req, res) => {
+  try {
+    const callback = req.body?.callback_query;
+    if (!callback) {
+      // Regular message — could be a comment reply
+      const message = req.body?.message;
+      if (message?.reply_to_message && message?.text) {
+        // Extract approval ID from the original message
+        const match = message.reply_to_message.text?.match(/ID: ([a-f0-9]{8})/);
+        if (match) {
+          const pool = getServerPgPool();
+          const { rows } = await pool.query(
+            "SELECT id FROM approvals WHERE id::text LIKE $1", [match[1] + "%"]
+          );
+          if (rows.length === 1) {
+            await pool.query(
+              "INSERT INTO approval_comments (id, approval_id, author, content) VALUES ($1, $2, 'human', $3)",
+              [crypto.randomUUID(), rows[0].id, message.text]
+            );
+            await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: `💬 Comment added to ${match[1]}` }),
+            });
+          }
+        }
+      }
+      res.json({ ok: true });
+      return;
+    }
+
+    // Button callback
+    const data = callback.data;
+    const [action, approvalId] = data.split(":");
+
+    if (!approvalId || !["approve", "reject"].includes(action)) {
+      res.json({ ok: true });
+      return;
+    }
+
+    const pool = getServerPgPool();
+    const status = action === "approve" ? "approved" : "rejected";
+
+    const { rowCount } = await pool.query(
+      "UPDATE approvals SET status = $1, responded_at = now() WHERE id = $2 AND status = 'pending'",
+      [status, approvalId]
+    );
+
+    // Answer the callback (removes loading spinner on button)
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        callback_query_id: callback.id,
+        text: rowCount > 0 ? `${status.charAt(0).toUpperCase() + status.slice(1)}!` : "Already responded",
+      }),
+    });
+
+    // Update the message to show the result
+    if (rowCount > 0) {
+      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          chat_id: callback.message.chat.id,
+          message_id: callback.message.message_id,
+          text: callback.message.text + `\n\n${status === "approved" ? "✅" : "❌"} ${status.toUpperCase()} at ${new Date().toISOString().slice(0, 19)}`,
+        }),
+      });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Telegram webhook error:", err.message);
+    res.json({ ok: true }); // Always 200 to Telegram
+  }
+});
+
 // Health check (no auth)
 app.get("/health", (req, res) => {
   res.json({ status: "ok", sessions: transports.size });

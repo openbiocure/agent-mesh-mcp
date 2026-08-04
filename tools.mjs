@@ -15,6 +15,24 @@ const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
 const STATUS_EXCHANGE = "agent.status";
 const MESH_DB_URL = process.env.MESH_DB_URL || "postgresql://postgres:postgres@postgres.lab/obc_mesh";
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8808069971:AAHGimNxHN7GssOterrZjU-pHSvZ78IsoCo";
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "1329256217";
+
+async function sendTelegramNotification(text, buttons = null) {
+  const body = { chat_id: TELEGRAM_CHAT_ID, text };
+  if (buttons) {
+    body.reply_markup = { inline_keyboard: buttons };
+  }
+  try {
+    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (err) {
+    console.error("Telegram notification failed:", err.message);
+  }
+}
 
 // Postgres pool for task result fallback
 let _pgPool = null;
@@ -1050,6 +1068,183 @@ Components: worker, mcp, scheduler, rabbitmq, postgres, valkey. Use list_mesh_bu
           return { content: [{ type: "text", text: `(error: bug \`${bug_id}\` not found)` }], isError: true };
         }
         return { content: [{ type: "text", text: `Bug \`${bug_id.slice(0, 8)}\` updated.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- request_approval ---
+  server.tool(
+    "request_approval",
+    `Request human approval before taking an irreversible action. Sends a Telegram notification with approve/reject buttons.
+
+Examples:
+  request_approval(title="Create PR for #364 fix", description="Fix LLMMapper signature in connector.py:108-110")
+  request_approval(title="Deploy release abc123", description="Requires migration, 30s downtime expected")
+
+The agent should poll get_approval(id) to check if approved/rejected. Read comments for refinement feedback.`,
+    {
+      title: z.string().describe("Short title for the approval request"),
+      description: z.string().optional().describe("Detailed description of what the agent wants to do"),
+    },
+    async ({ title, description }) => {
+      try {
+        const pool = getPgPool();
+        const id = crypto.randomUUID();
+        const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+        await pool.query(
+          `INSERT INTO approvals (id, title, description, requested_by, status, expires_at)
+           VALUES ($1, $2, $3, $4, 'pending', $5)`,
+          [id, title, description || null, AGENT_NAME, expiresAt]
+        );
+
+        // Send Telegram notification with buttons
+        const shortId = id.slice(0, 8);
+        const text = `🔔 Approval Request\n\n${AGENT_NAME} wants to:\n\n${title}${description ? "\n\n" + description.slice(0, 500) : ""}\n\nID: ${shortId}`;
+        await sendTelegramNotification(text, [
+          [
+            { text: "✅ Approve", callback_data: `approve:${id}` },
+            { text: "❌ Reject", callback_data: `reject:${id}` },
+          ],
+        ]);
+
+        return { content: [{ type: "text", text: `Approval requested: \`${shortId}\`\n\nTelegram notification sent. Poll with get_approval("${shortId}") to check status.` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- get_approval ---
+  server.tool(
+    "get_approval",
+    "Check the status of an approval request. Returns status, comments, and any refinement feedback.",
+    {
+      approval_id: z.string().describe("Approval UUID or short ID"),
+    },
+    async ({ approval_id }) => {
+      try {
+        approval_id = await resolveId("approvals", approval_id);
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT * FROM approvals WHERE id = $1", [approval_id]);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `(error: approval not found)` }], isError: true };
+        }
+        const a = rows[0];
+        const { rows: comments } = await pool.query(
+          "SELECT author, content, created_at FROM approval_comments WHERE approval_id = $1 ORDER BY created_at ASC", [approval_id]
+        );
+        let text = `**${a.title}** (\`${a.id.slice(0, 8)}\`)\n\nStatus: **${a.status}**\nRequested by: ${a.requested_by}\nCreated: ${new Date(a.created_at).toISOString().slice(0, 19)}`;
+        if (a.response_note) text += `\nResponse: ${a.response_note}`;
+        if (comments.length > 0) {
+          text += `\n\n**Comments (${comments.length}):**\n`;
+          text += comments.map(c => `- **${c.author}** (${new Date(c.created_at).toISOString().slice(0, 19)}): ${c.content}`).join("\n");
+        }
+        return { content: [{ type: "text", text }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_approvals ---
+  server.tool(
+    "list_approvals",
+    "List all approval requests, optionally filtered by status (pending, approved, rejected, expired).",
+    {
+      status: z.string().optional().describe("Filter by status"),
+    },
+    async ({ status }) => {
+      try {
+        const pool = getPgPool();
+        let sql = "SELECT id, title, requested_by, status, created_at FROM approvals";
+        const params = [];
+        if (status) { params.push(status); sql += " WHERE status = $1"; }
+        sql += " ORDER BY created_at DESC";
+        const { rows } = await pool.query(sql, params);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `No approvals${status ? ` with status '${status}'` : ""}.` }] };
+        }
+        const lines = rows.map(r =>
+          `- **${r.title}** (\`${r.id.slice(0, 8)}\`) — ${r.status}\n    By: ${r.requested_by} | ${new Date(r.created_at).toISOString().slice(0, 19)}`
+        );
+        return { content: [{ type: "text", text: `**Approvals (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- approve ---
+  server.tool(
+    "approve",
+    "Approve a pending approval request.",
+    {
+      approval_id: z.string().describe("Approval UUID or short ID"),
+      note: z.string().optional().describe("Optional note for the agent"),
+    },
+    async ({ approval_id, note }) => {
+      try {
+        approval_id = await resolveId("approvals", approval_id);
+        const pool = getPgPool();
+        const { rowCount } = await pool.query(
+          "UPDATE approvals SET status = 'approved', response_note = $1, responded_at = now() WHERE id = $2 AND status = 'pending'",
+          [note || null, approval_id]
+        );
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: approval not found or not pending)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Approval \`${approval_id.slice(0, 8)}\` approved.${note ? ` Note: ${note}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- reject ---
+  server.tool(
+    "reject",
+    "Reject an approval request with feedback. The agent will read the note to adjust its approach.",
+    {
+      approval_id: z.string().describe("Approval UUID or short ID"),
+      note: z.string().optional().describe("Feedback for the agent — why rejected, what to change"),
+    },
+    async ({ approval_id, note }) => {
+      try {
+        approval_id = await resolveId("approvals", approval_id);
+        const pool = getPgPool();
+        const { rowCount } = await pool.query(
+          "UPDATE approvals SET status = 'rejected', response_note = $1, responded_at = now() WHERE id = $2 AND status = 'pending'",
+          [note || null, approval_id]
+        );
+        if (rowCount === 0) {
+          return { content: [{ type: "text", text: `(error: approval not found or not pending)` }], isError: true };
+        }
+        return { content: [{ type: "text", text: `Approval \`${approval_id.slice(0, 8)}\` rejected.${note ? ` Feedback: ${note}` : ""}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- comment_approval ---
+  server.tool(
+    "comment_approval",
+    "Add a comment to an approval thread. Comments are append-only. Use for refinement feedback or review notes.",
+    {
+      approval_id: z.string().describe("Approval UUID or short ID"),
+      content: z.string().describe("Comment content"),
+    },
+    async ({ approval_id, content }) => {
+      try {
+        approval_id = await resolveId("approvals", approval_id);
+        const pool = getPgPool();
+        await pool.query(
+          "INSERT INTO approval_comments (id, approval_id, author, content) VALUES ($1, $2, $3, $4)",
+          [crypto.randomUUID(), approval_id, AGENT_NAME, content]
+        );
+        return { content: [{ type: "text", text: `Comment added to approval \`${approval_id.slice(0, 8)}\`.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
       }
