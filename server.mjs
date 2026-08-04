@@ -228,6 +228,7 @@ app.delete("/mcp", async (req, res) => {
 // --- Telegram webhook (no auth — Telegram sends callbacks here) ---
 
 import pg from "pg";
+import amqplib from "amqplib";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8808069971:AAHGimNxHN7GssOterrZjU-pHSvZ78IsoCo";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "1329256217";
