@@ -1250,4 +1250,72 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
       }
     }
   );
+
+  // --- set_setting ---
+  server.tool(
+    "set_setting",
+    `Set a mesh configuration value. Stored in postgres, no restart needed.
+
+Examples:
+  set_setting(key="TELEGRAM_ALLOWED_USERS", value="1329256217,987654321")
+  set_setting(key="DEPLOY_FREEZE", value="true")`,
+    {
+      key: z.string().describe("Setting key"),
+      value: z.string().describe("Setting value"),
+    },
+    async ({ key, value }) => {
+      try {
+        const pool = getPgPool();
+        await pool.query(
+          `INSERT INTO mesh_settings (key, value, updated_at) VALUES ($1, $2, now())
+           ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = now()`,
+          [key, value]
+        );
+        return { content: [{ type: "text", text: `Setting \`${key}\` = \`${value}\`` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- get_setting ---
+  server.tool(
+    "get_setting",
+    "Get a mesh configuration value.",
+    {
+      key: z.string().describe("Setting key"),
+    },
+    async ({ key }) => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT value FROM mesh_settings WHERE key = $1", [key]);
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: `Setting \`${key}\` not found.` }] };
+        }
+        return { content: [{ type: "text", text: `\`${key}\` = \`${rows[0].value}\`` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
+
+  // --- list_settings ---
+  server.tool(
+    "list_settings",
+    "List all mesh configuration settings.",
+    {},
+    async () => {
+      try {
+        const pool = getPgPool();
+        const { rows } = await pool.query("SELECT key, value, updated_at FROM mesh_settings ORDER BY key");
+        if (rows.length === 0) {
+          return { content: [{ type: "text", text: "No settings configured." }] };
+        }
+        const lines = rows.map(r => `- \`${r.key}\` = \`${r.value}\``);
+        return { content: [{ type: "text", text: `**Settings (${rows.length}):**\n\n${lines.join("\n")}` }] };
+      } catch (err) {
+        return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
+      }
+    }
+  );
 }
