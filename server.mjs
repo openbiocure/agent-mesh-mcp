@@ -231,6 +231,7 @@ import pg from "pg";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8808069971:AAHGimNxHN7GssOterrZjU-pHSvZ78IsoCo";
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "1329256217";
+const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "d341662f8d119512eef10545dc51a4b8ad233f5af1d5ed4a977741dcf4aab26c";
 const MESH_DB_URL_SERVER = process.env.MESH_DB_URL || "postgresql://postgres:postgres@postgres.lab/obc_mesh";
 
 let _pgPoolServer = null;
@@ -245,6 +246,11 @@ function getServerPgPool() {
 app.use(express.json());
 
 app.post("/telegram/webhook", async (req, res) => {
+  // Verify Telegram secret token
+  if (req.headers["x-telegram-bot-api-secret-token"] !== TELEGRAM_WEBHOOK_SECRET) {
+    res.status(403).json({ error: "forbidden" });
+    return;
+  }
   try {
     const callback = req.body?.callback_query;
     if (!callback) {
