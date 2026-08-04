@@ -336,6 +336,43 @@ app.post("/telegram/webhook", async (req, res) => {
           text: callback.message.text + `\n\n${status === "approved" ? "✅" : "❌"} ${status.toUpperCase()} at ${new Date().toISOString().slice(0, 19)}`,
         }),
       });
+
+      // Dispatch follow-up task to the requesting agent via RabbitMQ
+      try {
+        const { rows: approvalRows } = await pool.query(
+          "SELECT title, description, requested_by, worker_sid FROM approvals WHERE id = $1", [approvalId]
+        );
+        if (approvalRows.length > 0) {
+          const appr = approvalRows[0];
+          // Find which topic the requesting agent listens on
+          const { rows: workerRows } = await pool.query(
+            "SELECT topics FROM workers WHERE name = $1 AND status = 'online' ORDER BY last_heartbeat DESC LIMIT 1",
+            [appr.requested_by]
+          );
+          const topic = workerRows.length > 0 && workerRows[0].topics?.length > 0
+            ? workerRows[0].topics[0]
+            : `ask.${appr.requested_by}`;
+
+          const followUpMessage = status === "approved"
+            ? `Approval APPROVED: "${appr.title}". Proceed with the action you requested. Description: ${appr.description || "n/a"}`
+            : `Approval REJECTED: "${appr.title}". Do NOT proceed. ${appr.description || ""}`;
+
+          const conn = await amqplib.connect(RABBITMQ_URL);
+          const ch = await conn.createChannel();
+          await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+
+          const routingKey = appr.worker_sid ? `direct.${appr.worker_sid}` : topic;
+          ch.publish(EXCHANGE, routingKey, Buffer.from(JSON.stringify({
+            from: "approval-webhook",
+            message: followUpMessage,
+          })), { contentType: "application/json" });
+
+          await conn.close();
+          console.log(`Approval ${status}: dispatched follow-up to ${routingKey}`);
+        }
+      } catch (mqErr) {
+        console.error("Failed to dispatch approval follow-up:", mqErr.message);
+      }
     }
 
     res.json({ ok: true });
