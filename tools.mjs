@@ -339,63 +339,48 @@ Use list_agents() first to see available topics. For long tasks, set async=true 
     "Watch a running agent's live activity (tool calls, file reads, reasoning). Use after ask_agent(async=true) to monitor progress. Pass sid to filter to a specific worker instance.",
     {
       name: z.string().describe("Agent name to tail (e.g. 'js-engineer', 'backend-engineer')"),
-      duration: z.number().optional().describe("Seconds to tail for (default: 30, max: 120)"),
+      limit: z.number().optional().describe("Number of recent events to return (default: 20, max: 50)"),
       sid: z.string().optional().describe("Worker session ID to filter events. Only shows activity from this specific worker instance."),
     },
-    async ({ name, duration, sid }) => {
-      const seconds = Math.min(Math.max(1, duration || 30), 120);
-      let conn;
+    async ({ name, limit, sid }) => {
+      const maxRows = Math.min(Math.max(1, limit || 20), 50);
       try {
-        conn = await amqplib.connect(RABBITMQ_URL);
-        const ch = await conn.createChannel();
+        const pool = getPgPool();
+        let query, params;
+        if (sid) {
+          query = `SELECT worker_sid, event_type, content, timestamp
+                   FROM activity WHERE worker_name = $1 AND worker_sid = $2
+                   ORDER BY timestamp DESC LIMIT $3`;
+          params = [name, sid, maxRows];
+        } else {
+          query = `SELECT worker_sid, event_type, content, timestamp
+                   FROM activity WHERE worker_name = $1
+                   ORDER BY timestamp DESC LIMIT $2`;
+          params = [name, maxRows];
+        }
+        const { rows } = await pool.query(query, params);
+        rows.reverse(); // chronological order
 
-        await ch.assertExchange(STATUS_EXCHANGE, "topic", { durable: true });
-        const { queue } = await ch.assertQueue("", { exclusive: true, autoDelete: true });
-        await ch.bindQueue(queue, STATUS_EXCHANGE, `activity.${name}`);
-
-        const events = [];
-
-        await new Promise((resolve) => {
-          setTimeout(() => resolve(), seconds * 1000);
-
-          ch.consume(queue, (msg) => {
-            if (!msg) return;
-            ch.ack(msg);
-            try {
-              const evt = JSON.parse(msg.content.toString());
-              // Filter by sid if provided
-              if (sid && evt.sid !== sid) return;
-              events.push(evt);
-            } catch {
-              events.push({ type: "raw", content: msg.content.toString(), timestamp: new Date().toISOString() });
-            }
-          });
-        });
-
-        await conn.close();
-        conn = null;
-
-        if (events.length === 0) {
+        if (rows.length === 0) {
           const target = sid ? `**${name}** (sid: ${sid})` : `**${name}**`;
           return {
-            content: [{ type: "text", text: `No activity from ${target} in ${seconds}s. The agent may be idle or not running.` }],
+            content: [{ type: "text", text: `No activity from ${target}. The agent may be idle or not running.` }],
           };
         }
 
-        const lines = events.map((e) => {
-          const ts = e.timestamp ? e.timestamp.split("T")[1]?.replace("Z", "").slice(0, 8) : "??:??:??";
-          const icon = e.type === "tool_call" ? "[tool]"
-            : e.type === "error" ? "[error]"
-            : e.type === "status" ? "[status]"
+        const lines = rows.map((r) => {
+          const ts = r.timestamp ? new Date(r.timestamp).toISOString().split("T")[1]?.replace("Z", "").slice(0, 8) : "??:??:??";
+          const icon = r.event_type === "tool_call" ? "[tool]"
+            : r.event_type === "error" ? "[error]"
+            : r.event_type === "status" ? "[status]"
             : "[text]";
-          return `${ts} ${icon} ${e.content || ""}`;
+          return `${ts} ${icon} ${r.content || ""}`;
         });
 
         return {
-          content: [{ type: "text", text: `**Activity from ${name}** (${events.length} events in ${seconds}s):\n\n\`\`\`\n${lines.join("\n")}\n\`\`\`` }],
+          content: [{ type: "text", text: `**Activity from ${name}** (${rows.length} events):\n\n\`\`\`\n${lines.join("\n")}\n\`\`\`` }],
         };
       } catch (err) {
-        if (conn) await conn.close().catch(() => {});
         return {
           content: [{ type: "text", text: `(error tailing ${name}: ${err.message})` }],
           isError: true,
