@@ -345,15 +345,13 @@ app.post("/telegram/webhook", async (req, res) => {
         if (approvalRows.length > 0) {
           const appr = approvalRows[0];
           // Find which topic the requesting agent listens on
-          // Normalize: "DevOps Engineer" → "devops-engineer"
-          const agentSlug = appr.requested_by.toLowerCase().replace(/\s+/g, "-");
           const { rows: workerRows } = await pool.query(
             "SELECT topics FROM workers WHERE name = $1 AND status = 'online' ORDER BY last_heartbeat DESC LIMIT 1",
-            [agentSlug]
+            [appr.requested_by]
           );
           const topic = workerRows.length > 0 && workerRows[0].topics?.length > 0
             ? workerRows[0].topics[0]
-            : `ask.${agentSlug}`;
+            : `ask.${appr.requested_by}`;
 
           const followUpMessage = status === "approved"
             ? `Approval APPROVED: "${appr.title}". Proceed with the action you requested. Description: ${appr.description || "n/a"}`
