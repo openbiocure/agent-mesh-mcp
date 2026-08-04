@@ -12,7 +12,7 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { registerTools } from "./tools.mjs";
+import { registerTools } from "./tools/index.mjs";
 
 const server = new McpServer({
   name: "agent-mesh",

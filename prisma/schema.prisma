@@ -1,0 +1,223 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Activity {
+  id         String    @id @default(uuid()) @db.Uuid
+  workerSid  String?   @map("worker_sid")
+  workerName String    @map("worker_name")
+  callerId   String?   @map("caller_id")
+  taskId     String?   @map("task_id")
+  eventType  String    @map("event_type")
+  content    String?
+  timestamp  DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@map("activity")
+}
+
+model ApprovalComment {
+  id         String    @id @default(uuid()) @db.Uuid
+  approvalId String    @map("approval_id") @db.Uuid
+  author     String
+  content    String
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  approval Approval @relation(fields: [approvalId], references: [id])
+
+  @@map("approval_comments")
+}
+
+model Approval {
+  id           String    @id @default(uuid()) @db.Uuid
+  title        String
+  description  String?
+  requestedBy  String    @map("requested_by")
+  workerSid    String?   @map("worker_sid")
+  taskId       String?   @map("task_id")
+  status       String?
+  responseNote String?   @map("response_note")
+  createdAt    DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  respondedAt  DateTime? @map("responded_at") @db.Timestamptz(6)
+  expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
+
+  comments ApprovalComment[]
+
+  @@map("approvals")
+}
+
+model Conversation {
+  id         String                 @id @default(uuid()) @db.Uuid
+  workerName String                 @map("worker_name")
+  callerId   String                 @map("caller_id")
+  sessionNum Int?                   @map("session_num")
+  role       String
+  content    String
+  tokens     Int?
+  timestamp  DateTime?              @default(now()) @db.Timestamptz(6)
+  embedding  Unsupported("vector")?
+
+  @@map("conversations")
+}
+
+model Incident {
+  id            String    @id @default(uuid()) @db.Uuid
+  repo          String
+  ghIssue       Int?      @map("gh_issue")
+  ghPr          Int?      @map("gh_pr")
+  severity      String
+  status        String?
+  title         String
+  summary       String?
+  assignedAgent String?   @map("assigned_agent")
+  lastTaskId    String?   @map("last_task_id")
+  createdBy     String?   @map("created_by")
+  resolvedAt    DateTime? @map("resolved_at") @db.Timestamptz(6)
+  createdAt     DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt     DateTime? @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("incidents")
+}
+
+model MeshBug {
+  id          String    @id @default(uuid()) @db.Uuid
+  title       String
+  description String?
+  reportedBy  String?   @map("reported_by")
+  component   String?
+  severity    String?
+  status      String?
+  fixNotes    String?   @map("fix_notes")
+  createdAt   DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt  DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  @@map("mesh_bugs")
+}
+
+model MeshSetting {
+  key       String    @id
+  value     String?
+  updatedAt DateTime? @default(now()) @map("updated_at") @db.Timestamptz(6)
+
+  @@map("mesh_settings")
+}
+
+model Prompt {
+  id         String    @id @default(uuid()) @db.Uuid
+  agentName  String    @unique @map("agent_name")
+  content    String
+  version    Int?
+  sourceFile String?   @map("source_file")
+  updatedBy  String?   @map("updated_by")
+  updatedAt  DateTime? @default(now()) @map("updated_at") @db.Timestamptz(6)
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@map("prompts")
+}
+
+model Release {
+  id               String    @id @default(uuid()) @db.Uuid
+  name             String
+  prs              String[]
+  steps            String?
+  rollbackSteps    String?   @map("rollback_steps")
+  requiresMigration Boolean? @map("requires_migration")
+  requiresDowntime Boolean?  @map("requires_downtime")
+  notes            String?
+  status           String?
+  summary          String?
+  durationSeconds  Float?    @map("duration_seconds")
+  createdBy        String?   @map("created_by")
+  createdAt        DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt        DateTime? @map("started_at") @db.Timestamptz(6)
+  deployedAt       DateTime? @map("deployed_at") @db.Timestamptz(6)
+
+  @@map("releases")
+}
+
+model Schedule {
+  id              String    @id @default(uuid()) @db.Uuid
+  name            String
+  topic           String
+  message         String
+  cron            String?
+  intervalSeconds Int?      @map("interval_seconds")
+  callerId        String?   @map("caller_id")
+  enabled         Boolean?
+  lastRun         DateTime? @map("last_run") @db.Timestamptz(6)
+  nextRun         DateTime? @map("next_run") @db.Timestamptz(6)
+  createdBy       String?   @map("created_by")
+  createdAt       DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  status          String?   @default("idle")
+  lastTaskId      String?   @map("last_task_id")
+  lastResult      String?   @map("last_result")
+  lastError       String?   @map("last_error")
+  runCount        Int?      @default(0) @map("run_count")
+  failCount       Int?      @default(0) @map("fail_count")
+
+  @@map("schedules")
+}
+
+model Task {
+  taskId        String    @id @map("task_id")
+  workerSid     String?   @map("worker_sid")
+  workerName    String    @map("worker_name")
+  callerId      String    @map("caller_id")
+  topic         String
+  message       String?
+  status        String?   @default("accepted")
+  result        String?
+  tokensUsed    Int?      @default(0) @map("tokens_used")
+  replyTo       String?   @map("reply_to")
+  correlationId String?   @map("correlation_id")
+  createdAt     DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  startedAt     DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt   DateTime? @map("completed_at") @db.Timestamptz(6)
+  elapsedSeconds Float?   @map("elapsed_seconds")
+
+  worker Worker? @relation(fields: [workerSid], references: [sid], onUpdate: NoAction)
+
+  @@index([callerId], map: "idx_tasks_caller")
+  @@index([createdAt(sort: Desc)], map: "idx_tasks_created")
+  @@index([status], map: "idx_tasks_status")
+  @@index([workerName], map: "idx_tasks_worker")
+  @@map("tasks")
+}
+
+model WorkerLog {
+  id         String    @id @default(uuid()) @db.Uuid
+  workerSid  String?   @map("worker_sid")
+  workerName String    @map("worker_name")
+  callerId   String?   @map("caller_id")
+  taskId     String?   @map("task_id")
+  level      String
+  message    String
+  timestamp  DateTime? @default(now()) @db.Timestamptz(6)
+
+  @@map("worker_logs")
+}
+
+model Worker {
+  sid           String    @id
+  name          String
+  host          String?
+  topics        String[]
+  model         String?
+  maxTurns      Int?      @map("max_turns")
+  maxSessions   Int?      @default(5) @map("max_sessions")
+  status        String?   @default("online")
+  pid           Int?
+  startedAt     DateTime? @default(now()) @map("started_at") @db.Timestamptz(6)
+  lastHeartbeat DateTime? @default(now()) @map("last_heartbeat") @db.Timestamptz(6)
+  metadata      Json?     @default("{}")
+
+  tasks Task[]
+
+  @@index([name], map: "idx_workers_name")
+  @@index([status], map: "idx_workers_status")
+  @@map("workers")
+}

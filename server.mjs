@@ -21,18 +21,14 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createMcpExpressApp } from "@modelcontextprotocol/sdk/server/express.js";
 import crypto from "crypto";
 import express from "express";
-import { registerTools } from "./tools.mjs";
+import { registerTools } from "./tools/index.mjs";
+import { telegramWebhookHandler } from "./lib/telegram.mjs";
 
 // --- Config ---
 
 const PORT = parseInt(process.env.MCP_PORT || "3100", 10);
 const KEYCLOAK_URL = process.env.KEYCLOAK_URL || "https://identity.openbiocure.ai";
 const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM || "openbiocure";
-const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
-const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
-const RABBITMQ_MGMT_URL = process.env.RABBITMQ_MGMT_URL || "http://localhost:15672";
-const AGENT_NAME = process.env.AGENT_NAME || "remote";
-const TIMEOUT = parseInt(process.env.ASK_TIMEOUT || "900", 10) * 1000;
 
 // --- Keycloak token verification ---
 
@@ -227,161 +223,8 @@ app.delete("/mcp", async (req, res) => {
 
 // --- Telegram webhook (no auth — Telegram sends callbacks here) ---
 
-import pg from "pg";
-import amqplib from "amqplib";
-
-const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || "8808069971:AAHGimNxHN7GssOterrZjU-pHSvZ78IsoCo";
-const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID || "1329256217";
-const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET || "d341662f8d119512eef10545dc51a4b8ad233f5af1d5ed4a977741dcf4aab26c";
-const MESH_DB_URL_SERVER = process.env.MESH_DB_URL || "postgresql://postgres:postgres@postgres.lab/obc_mesh";
-
-let _pgPoolServer = null;
-function getServerPgPool() {
-  if (!_pgPoolServer) {
-    _pgPoolServer = new pg.Pool({ connectionString: MESH_DB_URL_SERVER, max: 2 });
-    _pgPoolServer.on("error", () => { _pgPoolServer = null; });
-  }
-  return _pgPoolServer;
-}
-
 app.use(express.json());
-
-app.post("/telegram/webhook", async (req, res) => {
-  // Verify Telegram secret token
-  if (req.headers["x-telegram-bot-api-secret-token"] !== TELEGRAM_WEBHOOK_SECRET) {
-    res.status(403).json({ error: "forbidden" });
-    return;
-  }
-  try {
-    const callback = req.body?.callback_query;
-    if (!callback) {
-      // Regular message — could be a comment reply
-      const message = req.body?.message;
-      if (message?.reply_to_message && message?.text) {
-        // Extract approval ID from the original message
-        const match = message.reply_to_message.text?.match(/ID: ([a-f0-9]{8})/);
-        if (match) {
-          const pool = getServerPgPool();
-          const { rows } = await pool.query(
-            "SELECT id FROM approvals WHERE id::text LIKE $1", [match[1] + "%"]
-          );
-          if (rows.length === 1) {
-            await pool.query(
-              "INSERT INTO approval_comments (id, approval_id, author, content) VALUES ($1, $2, 'human', $3)",
-              [crypto.randomUUID(), rows[0].id, message.text]
-            );
-            await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ chat_id: TELEGRAM_CHAT_ID, text: `💬 Comment added to ${match[1]}` }),
-            });
-          }
-        }
-      }
-      res.json({ ok: true });
-      return;
-    }
-
-    // Check allowed users from DB
-    const chatId = String(callback.from.id);
-    try {
-      const pool = getServerPgPool();
-      const { rows } = await pool.query("SELECT value FROM mesh_settings WHERE key = 'TELEGRAM_ALLOWED_USERS'");
-      const allowed = rows.length > 0 ? rows[0].value.split(",").map(s => s.trim()) : [TELEGRAM_CHAT_ID];
-      if (!allowed.includes(chatId)) {
-        await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ callback_query_id: callback.id, text: "Not authorized", show_alert: true }),
-        });
-        res.json({ ok: true });
-        return;
-      }
-    } catch { /* if DB fails, fall through with default check */ }
-
-    // Button callback
-    const data = callback.data;
-    const [action, approvalId] = data.split(":");
-
-    if (!approvalId || !["approve", "reject"].includes(action)) {
-      res.json({ ok: true });
-      return;
-    }
-
-    const pool = getServerPgPool();
-    const status = action === "approve" ? "approved" : "rejected";
-
-    const { rowCount } = await pool.query(
-      "UPDATE approvals SET status = $1, responded_at = now() WHERE id = $2 AND status = 'pending'",
-      [status, approvalId]
-    );
-
-    // Answer the callback (removes loading spinner on button)
-    await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/answerCallbackQuery`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        callback_query_id: callback.id,
-        text: rowCount > 0 ? `${status.charAt(0).toUpperCase() + status.slice(1)}!` : "Already responded",
-      }),
-    });
-
-    // Update the message to show the result
-    if (rowCount > 0) {
-      await fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/editMessageText`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: callback.message.chat.id,
-          message_id: callback.message.message_id,
-          text: callback.message.text + `\n\n${status === "approved" ? "✅" : "❌"} ${status.toUpperCase()} at ${new Date().toISOString().slice(0, 19)}`,
-        }),
-      });
-
-      // Dispatch follow-up task to the requesting agent via RabbitMQ
-      try {
-        const { rows: approvalRows } = await pool.query(
-          "SELECT title, description, requested_by, worker_sid FROM approvals WHERE id = $1", [approvalId]
-        );
-        if (approvalRows.length > 0) {
-          const appr = approvalRows[0];
-          // Find which topic the requesting agent listens on
-          const { rows: workerRows } = await pool.query(
-            "SELECT topics FROM workers WHERE name = $1 AND status = 'online' ORDER BY last_heartbeat DESC LIMIT 1",
-            [appr.requested_by]
-          );
-          const topic = workerRows.length > 0 && workerRows[0].topics?.length > 0
-            ? workerRows[0].topics[0]
-            : `ask.${appr.requested_by}`;
-
-          const followUpMessage = status === "approved"
-            ? `Approval APPROVED: "${appr.title}". Proceed with the action you requested. Description: ${appr.description || "n/a"}`
-            : `Approval REJECTED: "${appr.title}". Do NOT proceed. ${appr.description || ""}`;
-
-          const conn = await amqplib.connect(RABBITMQ_URL);
-          const ch = await conn.createChannel();
-          await ch.assertExchange(EXCHANGE, "topic", { durable: true });
-
-          const routingKey = appr.worker_sid ? `direct.${appr.worker_sid}` : topic;
-          ch.publish(EXCHANGE, routingKey, Buffer.from(JSON.stringify({
-            from: "approval-webhook",
-            message: followUpMessage,
-          })), { contentType: "application/json" });
-
-          await conn.close();
-          console.log(`Approval ${status}: dispatched follow-up to ${routingKey}`);
-        }
-      } catch (mqErr) {
-        console.error("Failed to dispatch approval follow-up:", mqErr.message);
-      }
-    }
-
-    res.json({ ok: true });
-  } catch (err) {
-    console.error("Telegram webhook error:", err.message);
-    res.json({ ok: true }); // Always 200 to Telegram
-  }
-});
+app.post("/telegram/webhook", telegramWebhookHandler);
 
 // Health check (no auth)
 app.get("/health", (req, res) => {
@@ -391,5 +234,4 @@ app.get("/health", (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Agent Mesh MCP (HTTP) listening on :${PORT}`);
   console.log(`Keycloak: ${KEYCLOAK_URL}/realms/${KEYCLOAK_REALM}`);
-  console.log(`RabbitMQ: ${RABBITMQ_URL}`);
 });
