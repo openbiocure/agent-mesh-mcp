@@ -867,7 +867,7 @@ Workflow: create (building) → add PRs/steps with update_release → mark ready
           const flags = [r.requires_migration && "migration", r.requires_downtime && "downtime"].filter(Boolean);
           const prs = (r.prs || []).join(", ") || "no PRs";
           const dur = r.duration_seconds ? ` (${Math.round(r.duration_seconds)}s)` : "";
-          return `- **${r.name}** (\`${r.id.slice(0, 8)}\`) — ${r.status}${dur}\n    PRs: ${prs}${flags.length ? ` | Flags: ${flags.join(", ")}` : ""}${r.summary ? `\n    Summary: ${r.summary.slice(0, 100)}` : ""}`;
+          return `- **${r.name}** (\`${r.id.slice(0, 8)}\`) — ${r.status}${dur}\n    PRs: ${prs}${flags.length ? ` | Flags: ${flags.join(", ")}` : ""}${r.summary ? `\n    Summary: ${r.summary}` : ""}`;
         });
         return { content: [{ type: "text", text: `**Releases (${rows.length}):**\n\n${lines.join("\n\n")}` }] };
       } catch (err) {
@@ -1103,7 +1103,7 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
 
         // Send Telegram notification with buttons
         const shortId = id.slice(0, 8);
-        const text = `🔔 Approval Request\n\n${requester} wants to:\n\n${title}${description ? "\n\n" + description.slice(0, 500) : ""}\n\nID: ${shortId}`;
+        const text = `🔔 Approval Request\n\n${requester} wants to:\n\n${title}${description ? "\n\n" + description : ""}\n\nID: ${shortId}`;
         await sendTelegramNotification(text, [
           [
             { text: "✅ Approve", callback_data: `approve:${id}` },
