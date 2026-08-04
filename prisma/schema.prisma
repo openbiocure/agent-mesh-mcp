@@ -38,7 +38,6 @@ model Approval {
   description  String?
   requestedBy  String    @map("requested_by")
   workerSid    String?   @map("worker_sid")
-  taskId       String?   @map("task_id")
   status       String?
   responseNote String?   @map("response_note")
   createdAt    DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
@@ -220,4 +219,21 @@ model Worker {
   @@index([name], map: "idx_workers_name")
   @@index([status], map: "idx_workers_status")
   @@map("workers")
+}
+
+model Feature {
+  id        String    @id @default(uuid()) @db.Uuid
+  name      String
+  spec      String?
+  status    String?   @default("draft")
+  priority  String?   @default("medium")
+  repos     String[]
+  issues    String[]
+  prs       String[]
+  releaseId String?   @map("release_id") @db.Uuid
+  createdBy String?   @map("created_by")
+  createdAt DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt DateTime? @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  @@map("features")
 }

@@ -11,6 +11,7 @@ import { registerApprovalTools } from "./approvals/index.mjs";
 import { registerMeshBugTools } from "./mesh-bugs/index.mjs";
 import { registerSettingsTools } from "./settings/index.mjs";
 import { registerConversationTools } from "./conversations/index.mjs";
+import { registerFeatureTools } from "./features/index.mjs";
 
 export function registerTools(server) {
   registerAgentTools(server);
@@ -22,4 +23,5 @@ export function registerTools(server) {
   registerMeshBugTools(server);
   registerSettingsTools(server);
   registerConversationTools(server);
+  registerFeatureTools(server);
 }
