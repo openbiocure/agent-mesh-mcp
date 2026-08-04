@@ -1093,12 +1093,13 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
       try {
         const pool = getPgPool();
         const id = crypto.randomUUID();
-        const requester = requested_by || AGENT_NAME;
+        const requester = requested_by || AGENT_NAME.toLowerCase().replace(/\s+/g, "-");
+        const workerSid = process.env.WORKER_SID || null;
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         await pool.query(
-          `INSERT INTO approvals (id, title, description, requested_by, status, expires_at)
-           VALUES ($1, $2, $3, $4, 'pending', $5)`,
-          [id, title, description || null, requester, expiresAt]
+          `INSERT INTO approvals (id, title, description, requested_by, worker_sid, status, expires_at)
+           VALUES ($1, $2, $3, $4, $5, 'pending', $6)`,
+          [id, title, description || null, requester, workerSid, expiresAt]
         );
 
         // Send Telegram notification with buttons
