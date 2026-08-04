@@ -1087,21 +1087,23 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
     {
       title: z.string().describe("Short title for the approval request"),
       description: z.string().optional().describe("Detailed description of what the agent wants to do"),
+      requested_by: z.string().optional().describe("Your agent name slug (e.g. 'devops-engineer'). Defaults to AGENT_NAME env var."),
     },
-    async ({ title, description }) => {
+    async ({ title, description, requested_by }) => {
       try {
         const pool = getPgPool();
         const id = crypto.randomUUID();
+        const requester = requested_by || AGENT_NAME;
         const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
         await pool.query(
           `INSERT INTO approvals (id, title, description, requested_by, status, expires_at)
            VALUES ($1, $2, $3, $4, 'pending', $5)`,
-          [id, title, description || null, AGENT_NAME, expiresAt]
+          [id, title, description || null, requester, expiresAt]
         );
 
         // Send Telegram notification with buttons
         const shortId = id.slice(0, 8);
-        const text = `🔔 Approval Request\n\n${AGENT_NAME} wants to:\n\n${title}${description ? "\n\n" + description.slice(0, 500) : ""}\n\nID: ${shortId}`;
+        const text = `🔔 Approval Request\n\n${requester} wants to:\n\n${title}${description ? "\n\n" + description.slice(0, 500) : ""}\n\nID: ${shortId}`;
         await sendTelegramNotification(text, [
           [
             { text: "✅ Approve", callback_data: `approve:${id}` },
