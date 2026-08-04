@@ -1,11 +1,14 @@
 {
   "name": "@openbiocure/agent-mesh-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "MCP server for inter-agent communication via RabbitMQ. Agents ask each other questions by topic.",
   "bin": {
     "agent-mesh-mcp": "index.mjs"
   },
   "type": "module",
+  "scripts": {
+    "postinstall": "prisma generate"
+  },
   "keywords": [
     "mcp",
     "agent",
@@ -21,8 +24,9 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
+    "@prisma/client": "^6.19.3",
     "amqplib": "^0.10.0",
     "express": "^5.2.1",
-    "pg": "^8.13.0"
+    "prisma": "^6.19.3"
   }
 }

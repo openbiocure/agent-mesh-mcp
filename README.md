@@ -51,9 +51,20 @@ EXCHANGE_NAME=agents \
 node server.mjs
 ```
 
-Then add as a custom connector in Claude.ai:
-- **URL**: `https://your-domain/mcp`
-- Claude.ai handles OAuth automatically via `/.well-known/oauth-authorization-server`
+Then add to Claude Code (`.mcp.json` or `.claude.json`):
+
+```json
+{
+  "mcpServers": {
+    "agent-mesh": {
+      "type": "http",
+      "url": "https://mesh.openbiocure.ai/mcp"
+    }
+  }
+}
+```
+
+Claude Code auto-discovers OAuth via `/.well-known/oauth-authorization-server` and handles the Keycloak login flow in your browser.
 
 ### Architecture
 
