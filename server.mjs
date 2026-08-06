@@ -171,18 +171,18 @@ app.post("/mcp", async (req, res) => {
   }
 
   // Expired or unknown session — return 404 per MCP spec
-  // Client MUST reinitialize with a fresh InitializeRequest
+  // Client should reinitialize automatically
   if (sessionId && req.body?.method !== "initialize") {
-    console.log(`Session ${sessionId} expired — returning 404 for client to reinitialize`);
+    console.log(`Session ${sessionId} expired — returning 404`);
     res.status(404).json({
       jsonrpc: "2.0",
-      error: { code: -32000, message: "Session expired. Please reinitialize." },
+      error: { code: -32600, message: "Session expired" },
       id: req.body?.id || null,
     });
     return;
   }
 
-  // New session (either no session ID, or initialize request)
+  // New session
   const transport = new StreamableHTTPServerTransport({
     sessionIdGenerator: () => crypto.randomUUID(),
   });
