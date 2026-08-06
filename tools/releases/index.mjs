@@ -4,10 +4,86 @@
 
 import { z } from "zod";
 import crypto from "crypto";
+import amqplib from "amqplib";
 import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
+import { resolveId, sendTelegramNotification } from "../../lib/helpers.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
+const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
+const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
+
+/**
+ * Deploy queue: dispatch one release at a time.
+ * P1/P2 hotfixes skip the queue and deploy immediately.
+ */
+async function triggerDeployIfReady() {
+  try {
+    // Check if anything is already deploying
+    const deploying = await prisma.release.findFirst({
+      where: { status: "deploying" },
+      select: { id: true, name: true, startedAt: true },
+    });
+
+    // Find next ready release (by creation date)
+    const next = await prisma.release.findFirst({
+      where: { status: "ready" },
+      orderBy: { createdAt: "asc" },
+      select: { id: true, name: true, incidentId: true },
+    });
+
+    if (!next) return; // nothing to deploy
+
+    // Check if this release is a hotfix (linked to a P1/P2 incident)
+    let isHotfix = false;
+    if (next.incidentId) {
+      const incident = await prisma.incident.findUnique({
+        where: { id: next.incidentId },
+        select: { severity: true },
+      });
+      isHotfix = incident && ["p1", "p2"].includes(incident.severity);
+    }
+
+    // If something is deploying and this is NOT a hotfix, wait or reclaim
+    if (deploying && !isHotfix) {
+      const elapsed = deploying.startedAt
+        ? (Date.now() - new Date(deploying.startedAt).getTime()) / 60000
+        : 999;
+      if (elapsed < 30) return; // still active, wait
+
+      // Stuck — reclaim
+      await prisma.release.update({
+        where: { id: deploying.id },
+        data: { status: "ready" },
+      });
+      await sendTelegramNotification(`⚠️ Release ${deploying.name} stuck deploying for ${Math.round(elapsed)}min — reclaimed to ready`);
+    }
+
+    // Hotfix with something deploying — notify but deploy anyway
+    if (deploying && isHotfix) {
+      await sendTelegramNotification(`🚨 HOTFIX ${next.name} — jumping deploy queue (linked to P1/P2 incident)`);
+    }
+
+    // Dispatch deploy
+    const conn = await amqplib.connect(RABBITMQ_URL);
+    const ch = await conn.createConfirmChannel();
+    await ch.assertExchange(EXCHANGE, "topic", { durable: true });
+    ch.publish(
+      EXCHANGE,
+      "ask.prod-ops",
+      Buffer.from(JSON.stringify({
+        from: "deploy-queue",
+        message: `Deploy release ${next.id.slice(0, 8)} "${next.name}". Run get_release("${next.id.slice(0, 8)}"), follow the steps, close_release when done.`,
+      })),
+      { contentType: "application/json" }
+    );
+    await ch.waitForConfirms().catch(() => {});
+    await conn.close();
+
+    await sendTelegramNotification(`🚀 Deploying: ${next.name} (${next.id.slice(0, 8)})${isHotfix ? " [HOTFIX]" : ""}`);
+  } catch (err) {
+    console.error("Deploy queue error:", err.message);
+  }
+}
 
 export function registerReleaseTools(server) {
   // --- create_release ---
@@ -26,9 +102,10 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
       steps: z.string().optional().describe("Deployment steps as markdown checklist"),
       requires_migration: z.boolean().optional().describe("Does this release require a DB migration?"),
       requires_downtime: z.boolean().optional().describe("Does this release require downtime?"),
+      incident_id: z.string().optional().describe("Linked incident UUID — P1/P2 incidents make this a hotfix that jumps the deploy queue"),
       notes: z.string().optional().describe("Dev notes"),
     },
-    async ({ name, prs, steps, requires_migration, requires_downtime, notes }) => {
+    async ({ name, prs, steps, requires_migration, requires_downtime, incident_id, notes }) => {
       try {
         const id = crypto.randomUUID();
         await prisma.release.create({
@@ -39,6 +116,7 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
             steps: steps || null,
             requiresMigration: requires_migration || false,
             requiresDowntime: requires_downtime || false,
+            incidentId: incident_id || null,
             notes: notes || null,
             status: "building",
             createdBy: AGENT_NAME,
@@ -155,6 +233,12 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
+
+        // Auto-trigger deploy queue when status changes to ready
+        if (status === "ready") {
+          await triggerDeployIfReady();
+        }
+
         return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` updated.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
@@ -187,6 +271,10 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
+
+        // Deploy finished — trigger next in queue
+        await triggerDeployIfReady();
+
         return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` closed as **${status}**.${summary ? `\n\n${summary}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
