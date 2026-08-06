@@ -40,6 +40,7 @@ model Approval {
   workerSid    String?   @map("worker_sid")
   status       String?
   responseNote String?   @map("response_note")
+  approvedBy   String?   @map("approved_by")
   createdAt    DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
   respondedAt  DateTime? @map("responded_at") @db.Timestamptz(6)
   expiresAt    DateTime? @map("expires_at") @db.Timestamptz(6)
