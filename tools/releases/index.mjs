@@ -86,11 +86,6 @@ async function triggerDeployIfReady() {
   }
 }
 
-// Self-healing: check every 60s for ready releases that nobody triggered
-setInterval(() => {
-  triggerDeployIfReady().catch((err) => console.error("Deploy poller error:", err.message));
-}, 60_000);
-
 export function registerReleaseTools(server) {
   // --- create_release ---
   server.tool(
