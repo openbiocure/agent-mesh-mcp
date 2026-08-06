@@ -7,6 +7,7 @@ import crypto from "crypto";
 import amqplib from "amqplib";
 import prisma from "../../lib/db.mjs";
 import { resolveId, sendTelegramNotification } from "../../lib/helpers.mjs";
+import { notifySubscribers } from "../../lib/telegram.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
@@ -234,6 +235,12 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
 
+        // Notify subscribers on status change
+        if (status) {
+          const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true } });
+          await notifySubscribers(release_id, rel?.name || "unknown", status);
+        }
+
         // Auto-trigger deploy queue when status changes to ready
         if (status === "ready") {
           await triggerDeployIfReady();
@@ -271,6 +278,10 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
+
+        // Notify subscribers
+        const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true } });
+        await notifySubscribers(release_id, rel?.name || "unknown", status, summary);
 
         // Deploy finished — trigger next in queue
         await triggerDeployIfReady();
