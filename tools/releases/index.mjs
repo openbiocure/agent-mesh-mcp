@@ -6,7 +6,8 @@ import { z } from "zod";
 import crypto from "crypto";
 import amqplib from "amqplib";
 import prisma from "../../lib/db.mjs";
-import { resolveId, sendTelegramNotification } from "../../lib/helpers.mjs";
+import { resolveId } from "../../lib/helpers.mjs";
+import { sendNotification } from "../../lib/notifications.mjs";
 import { notifySubscribers } from "../../lib/telegram.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
@@ -56,12 +57,12 @@ async function triggerDeployIfReady() {
         where: { id: deploying.id },
         data: { status: "ready" },
       });
-      await sendTelegramNotification(`⚠️ Release ${deploying.name} stuck deploying for ${Math.round(elapsed)}min — reclaimed to ready`);
+      await sendNotification({ type: "warning", title: `Release ${deploying.name} stuck ${Math.round(elapsed)}min — reclaimed`, workerName: "deploy-queue" });
     }
 
     // Hotfix with something deploying — notify but deploy anyway
     if (deploying && isHotfix) {
-      await sendTelegramNotification(`🚨 HOTFIX ${next.name} — jumping deploy queue (linked to P1/P2 incident)`);
+      await sendNotification({ type: "incident", title: `HOTFIX ${next.name} — jumping deploy queue`, workerName: "deploy-queue" });
     }
 
     // Dispatch deploy
@@ -80,7 +81,7 @@ async function triggerDeployIfReady() {
     await ch.waitForConfirms().catch(() => {});
     await conn.close();
 
-    await sendTelegramNotification(`🚀 Deploying: ${next.name} (${next.id.slice(0, 8)})${isHotfix ? " [HOTFIX]" : ""}`);
+    await sendNotification({ type: "deploy", title: `Deploying: ${next.name} (${next.id.slice(0, 8)})${isHotfix ? " [HOTFIX]" : ""}`, workerName: "deploy-queue" });
   } catch (err) {
     console.error("Deploy queue error:", err.message);
   }
