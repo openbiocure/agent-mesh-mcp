@@ -5,8 +5,7 @@
 import { z } from "zod";
 import crypto from "crypto";
 import amqplib from "amqplib";
-import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
+import prisma, { resolveId } from "../../lib/db/index.mjs";
 
 const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";

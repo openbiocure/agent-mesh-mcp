@@ -4,9 +4,8 @@
 
 import { z } from "zod";
 import crypto from "crypto";
-import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
-import { sendNotification } from "../../lib/notifications.mjs";
+import prisma, { resolveId } from "../../lib/db/index.mjs";
+import { emit } from "../../lib/events/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 
@@ -34,10 +33,7 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
         const id = crypto.randomUUID();
         await prisma.incident.create({
           data: {
-            id,
-            repo,
-            title,
-            severity,
+            id, repo, title, severity,
             ghIssue: gh_issue || null,
             summary: summary || null,
             assignedAgent: assigned_agent || null,
@@ -45,19 +41,16 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
             createdBy: AGENT_NAME,
           },
         });
+
+        await emit("incident.created", {
+          id, repo, title, severity,
+          gh_issue: gh_issue || null,
+          summary: summary || null,
+          assigned_agent: assigned_agent || null,
+          created_by: AGENT_NAME,
+        });
+
         const ghRef = gh_issue ? ` (${repo}#${gh_issue})` : "";
-
-        // Notify on Telegram for P1/P2
-        if (["p1", "p2"].includes(severity)) {
-          await sendNotification({
-            type: "incident",
-            title: `NEW ${severity.toUpperCase()}: ${title}${ghRef}`,
-            message: `Repo: ${repo}${summary ? "\n" + summary : ""}`,
-            workerName: AGENT_NAME.toLowerCase().replace(/\s+/g, "-"),
-            workerSid: process.env.WORKER_SID || null,
-          });
-        }
-
         return { content: [{ type: "text", text: `Incident created: \`${id.slice(0, 8)}\`\n\n- **[${severity.toUpperCase()}]** ${title}${ghRef}\n- Status: open${assigned_agent ? `\n- Assigned: ${assigned_agent}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error creating incident: ${err.message})` }], isError: true };
@@ -82,7 +75,7 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
         const rows = await prisma.incident.findMany({
           where,
           orderBy: [
-            { severity: "asc" }, // p1 < p2 < p3 alphabetically — works
+            { severity: "asc" },
             { createdAt: "desc" },
           ],
         });
@@ -137,6 +130,16 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: incident \`${incident_id}\` not found)` }], isError: true };
         }
+
+        if (status) {
+          await emit("incident.status_changed", {
+            id: incident_id, status,
+            severity: severity || undefined,
+            assigned_agent: assigned_agent || undefined,
+            gh_pr: gh_pr || undefined,
+          });
+        }
+
         return { content: [{ type: "text", text: `Incident \`${incident_id.slice(0, 8)}\` updated.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
@@ -169,6 +172,9 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: incident \`${incident_id}\` not found)` }], isError: true };
         }
+
+        await emit("incident.resolved", { id: incident_id, gh_pr: gh_pr || undefined });
+
         return { content: [{ type: "text", text: `Incident \`${incident_id.slice(0, 8)}\` resolved.${gh_pr ? ` Fix: PR #${gh_pr}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };

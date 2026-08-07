@@ -1,7 +1,9 @@
 /**
  * Tool registry — imports all domain tools and registers them on the MCP server.
+ * Also bootstraps domain event listeners (side effects).
  */
 
+import "../lib/listeners/index.mjs";
 import { registerAgentTools } from "./agents/index.mjs";
 import { registerSchedulingTools } from "./scheduling/index.mjs";
 import { registerPromptTools } from "./prompts/index.mjs";

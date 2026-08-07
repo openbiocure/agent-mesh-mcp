@@ -4,7 +4,7 @@
 
 import { z } from "zod";
 import crypto from "crypto";
-import prisma from "../../lib/db.mjs";
+import prisma from "../../lib/db/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 

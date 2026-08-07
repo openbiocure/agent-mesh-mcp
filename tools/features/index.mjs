@@ -4,8 +4,8 @@
 
 import { z } from "zod";
 import crypto from "crypto";
-import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
+import prisma, { resolveId } from "../../lib/db/index.mjs";
+import { emit } from "../../lib/events/index.mjs";
 
 export function registerFeatureTools(server) {
   // --- create_feature ---
@@ -152,6 +152,11 @@ Examples:
         }
 
         await prisma.feature.update({ where: { id: feature_id }, data });
+
+        if (status !== undefined) {
+          await emit("feature.status_changed", { id: feature_id, status, name: name || undefined });
+        }
+
         return { content: [{ type: "text", text: `Feature \`${feature_id.slice(0, 8)}\` updated.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
