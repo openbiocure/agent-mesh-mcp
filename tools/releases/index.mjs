@@ -117,7 +117,7 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
             steps: steps || null,
             requiresMigration: requires_migration || false,
             requiresDowntime: requires_downtime || false,
-            incidentId: incident_id || null,
+            incidentId: incident_id ? await resolveId("incidents", incident_id) : null,
             notes: notes || null,
             status: "building",
             createdBy: AGENT_NAME,
