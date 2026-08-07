@@ -44,7 +44,8 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
           },
         });
 
-        // Send Telegram notification with buttons
+        // TODO: migrate to lib/notifications.mjs once sendNotification supports buttons
+        // This is the only place still using sendTelegramNotification directly
         const shortId = id.slice(0, 8);
         const text = `\u{1F514} Approval Request\n\n${requester} wants to:\n\n${title}${description ? "\n\n" + description : ""}\n\nID: ${shortId}`;
         await sendTelegramNotification(text, [
