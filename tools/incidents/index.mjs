@@ -5,7 +5,7 @@
 import { z } from "zod";
 import crypto from "crypto";
 import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
+import { resolveId, sendTelegramNotification } from "../../lib/helpers.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 
@@ -45,6 +45,13 @@ Use list_incidents() to see tracked incidents. Use update_incident() to change s
           },
         });
         const ghRef = gh_issue ? ` (${repo}#${gh_issue})` : "";
+
+        // Notify on Telegram for P1/P2
+        if (["p1", "p2"].includes(severity)) {
+          const icon = severity === "p1" ? "🔴" : "🟠";
+          await sendTelegramNotification(`${icon} NEW ${severity.toUpperCase()} INCIDENT\n\n${title}${ghRef}\n\nRepo: ${repo}\n${summary || ""}\n\nID: ${id.slice(0, 8)}`);
+        }
+
         return { content: [{ type: "text", text: `Incident created: \`${id.slice(0, 8)}\`\n\n- **[${severity.toUpperCase()}]** ${title}${ghRef}\n- Status: open${assigned_agent ? `\n- Assigned: ${assigned_agent}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error creating incident: ${err.message})` }], isError: true };
