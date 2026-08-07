@@ -25,7 +25,7 @@ import express from "express";
 import { registerTools } from "./tools/index.mjs";
 
 const BUILD = (() => { try { return execSync("git rev-parse --short=7 HEAD", { stdio: ["pipe","pipe","ignore"] }).toString().trim(); } catch { return "unknown"; } })();
-import { telegramWebhookHandler } from "./lib/telegram.mjs";
+import { telegramWebhookHandler } from "./lib/telegram/index.mjs";
 
 // --- Config ---
 

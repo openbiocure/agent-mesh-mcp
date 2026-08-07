@@ -8,7 +8,7 @@ import amqplib from "amqplib";
 import prisma from "../../lib/db.mjs";
 import { resolveId } from "../../lib/helpers.mjs";
 import { sendNotification } from "../../lib/notifications.mjs";
-import { notifySubscribers } from "../../lib/telegram.mjs";
+import { notifySubscribers } from "../../lib/telegram/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";

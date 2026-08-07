@@ -239,3 +239,28 @@ model Feature {
 
   @@map("features")
 }
+
+model Subscription {
+  id         String    @id @default(uuid()) @db.Uuid
+  entityType String    @map("entity_type")
+  entityId   String    @map("entity_id")
+  chatId     String    @map("chat_id")
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([entityType, entityId], map: "idx_subs_entity")
+  @@map("subscriptions")
+}
+
+model Notification {
+  id         String    @id @default(uuid()) @db.Uuid
+  workerName String    @map("worker_name")
+  workerSid  String?   @map("worker_sid")
+  messageId  Int?      @map("message_id")
+  chatId     String?   @map("chat_id")
+  type       String?   @default("info")
+  title      String?
+  createdAt  DateTime? @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([messageId], map: "idx_notif_msg")
+  @@map("notifications")
+}
