@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import { sendNotification } from "../../lib/notifications.mjs";
+import { sendNotification } from "../../lib/notifications/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 const WORKER_SID = process.env.WORKER_SID || null;

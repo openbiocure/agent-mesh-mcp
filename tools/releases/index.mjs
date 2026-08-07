@@ -4,88 +4,10 @@
 
 import { z } from "zod";
 import crypto from "crypto";
-import amqplib from "amqplib";
-import prisma from "../../lib/db.mjs";
-import { resolveId } from "../../lib/helpers.mjs";
-import { sendNotification } from "../../lib/notifications.mjs";
-import { notifySubscribers } from "../../lib/telegram/index.mjs";
+import prisma, { resolveId } from "../../lib/db/index.mjs";
+import { emit } from "../../lib/events/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
-const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://guest:guest@localhost:5672/";
-const EXCHANGE = process.env.EXCHANGE_NAME || "agents";
-
-/**
- * Deploy queue: dispatch one release at a time.
- * P1/P2 hotfixes skip the queue and deploy immediately.
- */
-async function triggerDeployIfReady() {
-  try {
-    // Check if anything is already deploying
-    const deploying = await prisma.release.findFirst({
-      where: { status: "deploying" },
-      select: { id: true, name: true, startedAt: true },
-    });
-
-    // Find next ready release (by creation date)
-    const next = await prisma.release.findFirst({
-      where: { status: "ready" },
-      orderBy: { createdAt: "asc" },
-      select: { id: true, name: true, incidentId: true },
-    });
-
-    if (!next) return; // nothing to deploy
-
-    // Check if this release is a hotfix (linked to a P1/P2 incident)
-    let isHotfix = false;
-    if (next.incidentId) {
-      const incident = await prisma.incident.findUnique({
-        where: { id: next.incidentId },
-        select: { severity: true },
-      });
-      isHotfix = incident && ["p1", "p2"].includes(incident.severity);
-    }
-
-    // If something is deploying and this is NOT a hotfix, wait or reclaim
-    if (deploying && !isHotfix) {
-      const elapsed = deploying.startedAt
-        ? (Date.now() - new Date(deploying.startedAt).getTime()) / 60000
-        : 999;
-      if (elapsed < 30) return; // still active, wait
-
-      // Stuck — reclaim
-      await prisma.release.update({
-        where: { id: deploying.id },
-        data: { status: "ready" },
-      });
-      await sendNotification({ type: "warning", title: `Release ${deploying.name} stuck ${Math.round(elapsed)}min — reclaimed`, workerName: "deploy-queue" });
-    }
-
-    // Hotfix with something deploying — notify but deploy anyway
-    if (deploying && isHotfix) {
-      await sendNotification({ type: "incident", title: `HOTFIX ${next.name} — jumping deploy queue`, workerName: "deploy-queue" });
-    }
-
-    // Dispatch deploy
-    const conn = await amqplib.connect(RABBITMQ_URL);
-    const ch = await conn.createConfirmChannel();
-    await ch.assertExchange(EXCHANGE, "topic", { durable: true });
-    ch.publish(
-      EXCHANGE,
-      "ask.prod-ops",
-      Buffer.from(JSON.stringify({
-        from: "deploy-queue",
-        message: `Deploy release ${next.id.slice(0, 8)} "${next.name}". Run get_release("${next.id.slice(0, 8)}"), follow the steps, close_release when done.`,
-      })),
-      { contentType: "application/json" }
-    );
-    await ch.waitForConfirms().catch(() => {});
-    await conn.close();
-
-    await sendNotification({ type: "deploy", title: `Deploying: ${next.name} (${next.id.slice(0, 8)})${isHotfix ? " [HOTFIX]" : ""}`, workerName: "deploy-queue" });
-  } catch (err) {
-    console.error("Deploy queue error:", err.message);
-  }
-}
 
 export function registerReleaseTools(server) {
   // --- create_release ---
@@ -236,15 +158,11 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
 
-        // Notify subscribers on status change
         if (status) {
-          const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true } });
-          await notifySubscribers(release_id, rel?.name || "unknown", status);
-        }
-
-        // Auto-trigger deploy queue when status changes to ready
-        if (status === "ready") {
-          await triggerDeployIfReady();
+          const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true, incidentId: true } });
+          await emit("release.status_changed", {
+            id: release_id, name: rel?.name, status, incident_id: rel?.incidentId || undefined,
+          });
         }
 
         return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` updated.` }] };
@@ -280,12 +198,12 @@ Workflow: create (building) \u2192 add PRs/steps with update_release \u2192 mark
           return { content: [{ type: "text", text: `(error: release \`${release_id}\` not found)` }], isError: true };
         }
 
-        // Notify subscribers
-        const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true } });
-        await notifySubscribers(release_id, rel?.name || "unknown", status, summary);
-
-        // Deploy finished — trigger next in queue
-        await triggerDeployIfReady();
+        const rel = await prisma.release.findUnique({ where: { id: release_id }, select: { name: true, incidentId: true } });
+        await emit("release.closed", {
+          id: release_id, name: rel?.name, status,
+          incident_id: rel?.incidentId || undefined,
+          summary: summary || undefined,
+        });
 
         return { content: [{ type: "text", text: `Release \`${release_id.slice(0, 8)}\` closed as **${status}**.${summary ? `\n\n${summary}` : ""}` }] };
       } catch (err) {

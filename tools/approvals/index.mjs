@@ -4,8 +4,8 @@
 
 import { z } from "zod";
 import crypto from "crypto";
-import prisma from "../../lib/db.mjs";
-import { resolveId, sendTelegramNotification } from "../../lib/helpers.mjs";
+import prisma, { resolveId } from "../../lib/db/index.mjs";
+import { emit } from "../../lib/events/index.mjs";
 
 const AGENT_NAME = process.env.AGENT_NAME || "unknown";
 
@@ -34,8 +34,7 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
 
         await prisma.approval.create({
           data: {
-            id,
-            title,
+            id, title,
             description: description || null,
             requestedBy: requester,
             workerSid,
@@ -44,17 +43,11 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
           },
         });
 
-        // TODO: migrate to lib/notifications.mjs once sendNotification supports buttons
-        // This is the only place still using sendTelegramNotification directly
-        const shortId = id.slice(0, 8);
-        const text = `\u{1F514} Approval Request\n\n${requester} wants to:\n\n${title}${description ? "\n\n" + description : ""}\n\nID: ${shortId}`;
-        await sendTelegramNotification(text, [
-          [
-            { text: "\u2705 Approve", callback_data: `approve:${id}` },
-            { text: "\u274C Reject", callback_data: `reject:${id}` },
-          ],
-        ]);
+        await emit("approval.created", {
+          id, title, description, requested_by: requester, worker_sid: workerSid,
+        });
 
+        const shortId = id.slice(0, 8);
         return { content: [{ type: "text", text: `Approval requested: \`${shortId}\`\n\nTelegram notification sent. Poll with get_approval("${shortId}") to check status.` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
@@ -147,6 +140,9 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: approval not found or not pending)` }], isError: true };
         }
+
+        await emit("approval.responded", { id: approval_id, status: "approved", note: note || undefined });
+
         return { content: [{ type: "text", text: `Approval \`${approval_id.slice(0, 8)}\` approved.${note ? ` Note: ${note}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };
@@ -176,6 +172,9 @@ The agent should poll get_approval(id) to check if approved/rejected. Read comme
         if (updated.count === 0) {
           return { content: [{ type: "text", text: `(error: approval not found or not pending)` }], isError: true };
         }
+
+        await emit("approval.responded", { id: approval_id, status: "rejected", note: note || undefined });
+
         return { content: [{ type: "text", text: `Approval \`${approval_id.slice(0, 8)}\` rejected.${note ? ` Feedback: ${note}` : ""}` }] };
       } catch (err) {
         return { content: [{ type: "text", text: `(error: ${err.message})` }], isError: true };

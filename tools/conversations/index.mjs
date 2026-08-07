@@ -3,7 +3,7 @@
  */
 
 import { z } from "zod";
-import prisma from "../../lib/db.mjs";
+import prisma from "../../lib/db/index.mjs";
 
 export function registerConversationTools(server) {
   server.tool(
